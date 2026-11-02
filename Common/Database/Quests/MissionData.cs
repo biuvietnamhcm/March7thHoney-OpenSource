@@ -45,6 +45,7 @@ public class MissionData : BaseDatabaseDataHelper
 
     public void SetMainMissionStatus(int missionId, MissionPhaseEnum phase)
     {
+        DatabaseHelper.ToSaveUidList.SafeAdd(Uid);
         if (phase == MissionPhaseEnum.Finish)
         {
             FinishedMainMissionIds.SafeAdd(missionId);
@@ -64,6 +65,7 @@ public class MissionData : BaseDatabaseDataHelper
 
     public void SetSubMissionStatus(int missionId, MissionPhaseEnum phase)
     {
+        DatabaseHelper.ToSaveUidList.SafeAdd(Uid);
         if (phase == MissionPhaseEnum.Finish)
         {
             FinishedSubMissionIds.SafeAdd(missionId);

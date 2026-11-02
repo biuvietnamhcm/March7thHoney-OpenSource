@@ -10,7 +10,10 @@ public class MissionHandlerDelTrialAvatar : MissionFinishTypeHandler
 {
     public override async ValueTask HandleMissionFinishType(PlayerInstance player, SubMissionInfo info, object? arg)
     {
-        await player.MissionManager!.FinishSubMission(info.ID);
+        var lineup = player.LineupManager?.GetCurLineup();
+        if (lineup?.BaseAvatars != null &&
+            lineup.BaseAvatars.All(avatar => avatar.SpecialAvatarId != info.ParamInt1))
+            await player.MissionManager!.FinishSubMission(info.ID);
     }
 
     public override async ValueTask HandleQuestFinishType(PlayerInstance player, QuestDataExcel quest,

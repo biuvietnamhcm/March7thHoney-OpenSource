@@ -5,11 +5,12 @@ namespace March7thHoney.GameServer.Server.Packet.Send.Mission;
 
 public class PacketFinishCosumeItemMissionScRsp : BasePacket
 {
-    public PacketFinishCosumeItemMissionScRsp(uint subMissionId) : base(CmdIds.FinishCosumeItemMissionScRsp)
+    public PacketFinishCosumeItemMissionScRsp(uint subMissionId, Retcode retcode = Retcode.RetSucc) : base(CmdIds.FinishCosumeItemMissionScRsp)
     {
         var proto = new FinishCosumeItemMissionScRsp
         {
-            SubMissionId = subMissionId
+            SubMissionId = subMissionId,
+            Retcode = (uint)retcode
         };
 
         SetData(proto);

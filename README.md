@@ -91,6 +91,12 @@ dotnet run --project program
 dotnet build program/program.csproj -c Release
 ```
 
+For a standalone Windows x64 server, place the game resource pack in `Resources/`
+and run `Build-Standalone.bat`. The output is `artifacts/standalone/win-x64/`;
+launch `Start-Server.bat` there. Copy the entire output directory to another PC;
+no .NET installation is required on that PC. Resources and build outputs are ignored by Git.
+See [standalone build instructions (Vietnamese)](docs/StandaloneBuild_vi.md).
+
 ## CI Artifacts
 
 Workflow publishes self-contained builds for:

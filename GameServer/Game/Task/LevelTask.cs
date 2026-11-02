@@ -39,27 +39,28 @@ public class LevelTask(PlayerInstance player)
 
     #region Manage
 
-    public void TriggerInitAct(LevelInitSequeceConfigInfo act, SubMissionData subMission, GroupInfo? group = null)
+    public async ValueTask TriggerInitAct(LevelInitSequeceConfigInfo act, SubMissionData subMission, GroupInfo? group = null)
     {
-        foreach (var task in act.TaskList) TriggerTask(task, subMission, group);
+        foreach (var task in act.TaskList) await TriggerTask(task, subMission, group);
     }
 
-    public void TriggerStartAct(LevelStartSequeceConfigInfo act, SubMissionData subMission, GroupInfo? group = null)
+    public async ValueTask TriggerStartAct(LevelStartSequeceConfigInfo act, SubMissionData subMission, GroupInfo? group = null)
     {
-        foreach (var task in act.TaskList) TriggerTask(task, subMission, group);
+        foreach (var task in act.TaskList) await TriggerTask(task, subMission, group);
     }
 
-    private void TriggerTask(TaskConfigInfo act, SubMissionData subMission, GroupInfo? group = null)
+    private async ValueTask TriggerTask(TaskConfigInfo act, SubMissionData subMission, GroupInfo? group = null)
     {
         try
         {
             var methodName = act.Type.Replace("RPG.GameCore.", "");
 
             var method = GetOrCreateExecuteTask(methodName);
-            if (method != null) _ = method(act, subMission, group);
+            if (method != null) await method(act, subMission, group);
         }
-        catch
+        catch (Exception ex)
         {
+            March7thHoney.Util.Logger.GetByClassName().Error($"Failed level task {act.Type} for mission {subMission.SubMissionInfo?.ID}", ex);
         }
     }
 
@@ -145,10 +146,10 @@ public class LevelTask(PlayerInstance player)
         if (act is TriggerPerformance triggerPerformance)
         {
             if (triggerPerformance.PerformanceType == ELevelPerformanceTypeEnum.E)
-                Player.TaskManager?.PerformanceTrigger.TriggerPerformanceE(triggerPerformance.PerformanceID,
+                await Player.TaskManager!.PerformanceTrigger.TriggerPerformanceE(triggerPerformance.PerformanceID,
                     subMission);
             else if (triggerPerformance.PerformanceType == ELevelPerformanceTypeEnum.D)
-                Player.TaskManager?.PerformanceTrigger.TriggerPerformanceD(triggerPerformance.PerformanceID,
+                await Player.TaskManager!.PerformanceTrigger.TriggerPerformanceD(triggerPerformance.PerformanceID,
                     subMission);
         }
 
@@ -171,10 +172,10 @@ public class LevelTask(PlayerInstance player)
             var resp = await method(predicateTaskList.Predicate, subMission, group);
             if (resp is true)
                 foreach (var task in predicateTaskList.SuccessTaskList)
-                    TriggerTask(task, subMission, group);
+                    await TriggerTask(task, subMission, group);
             else
                 foreach (var task in predicateTaskList.FailedTaskList)
-                    TriggerTask(task, subMission, group);
+                    await TriggerTask(task, subMission, group);
         }
 
         return null;
@@ -222,8 +223,8 @@ public class LevelTask(PlayerInstance player)
             await Player.LineupManager!.AddAvatarToCurTeam(subMission.SubMissionInfo.ParamInt1);
 
         if (subMission.SubMissionInfo?.FinishType == MissionFinishTypeEnum.GetTrialAvatarList)
-            subMission.SubMissionInfo.ParamIntList?.ForEach(
-                async x => await Player.LineupManager!.AddAvatarToCurTeam(x));
+            foreach (var avatarId in subMission.SubMissionInfo.ParamIntList ?? [])
+                await Player.LineupManager!.AddAvatarToCurTeam(avatarId);
 
         return null;
     }
@@ -234,16 +235,16 @@ public class LevelTask(PlayerInstance player)
         if (subMission.SubMissionInfo?.FinishType == MissionFinishTypeEnum.GetTrialAvatar)
         {
             var ids = Player.LineupManager!.GetCurLineup()?.BaseAvatars?.ToList() ?? [];
-            ids.ForEach(async x => await Player.LineupManager!.RemoveAvatarFromCurTeam(x.BaseAvatarId, false));
+            foreach (var avatar in ids) await Player.LineupManager!.RemoveAvatarFromCurTeam(avatar.BaseAvatarId, false);
             await Player.LineupManager!.AddAvatarToCurTeam(subMission.SubMissionInfo.ParamInt1);
         }
 
         if (subMission.SubMissionInfo?.FinishType == MissionFinishTypeEnum.GetTrialAvatarList)
         {
             var ids = Player.LineupManager!.GetCurLineup()?.BaseAvatars?.ToList() ?? [];
-            ids.ForEach(async x => await Player.LineupManager!.RemoveAvatarFromCurTeam(x.BaseAvatarId, false));
-            subMission.SubMissionInfo.ParamIntList?.ForEach(
-                async x => await Player.LineupManager!.AddAvatarToCurTeam(x));
+            foreach (var avatar in ids) await Player.LineupManager!.RemoveAvatarFromCurTeam(avatar.BaseAvatarId, false);
+            foreach (var avatarId in subMission.SubMissionInfo.ParamIntList ?? [])
+                await Player.LineupManager!.AddAvatarToCurTeam(avatarId);
         }
 
         return null;
@@ -255,7 +256,7 @@ public class LevelTask(PlayerInstance player)
         if (subMission.SubMissionInfo?.FinishType == MissionFinishTypeEnum.StoryLineAddTrialAvatar)
         {
             var ids = Player.LineupManager!.GetCurLineup()?.BaseAvatars?.ToList() ?? [];
-            ids.ForEach(async void (x) => await Player.LineupManager!.RemoveAvatarFromCurTeam(x.BaseAvatarId, false));
+            foreach (var avatar in ids) await Player.LineupManager!.RemoveAvatarFromCurTeam(avatar.BaseAvatarId, false);
             await Player.LineupManager!.AddAvatarToCurTeam(subMission.SubMissionInfo.ParamInt1);
         }
 
@@ -270,7 +271,7 @@ public class LevelTask(PlayerInstance player)
         if (subMission.SubMissionInfo?.FinishType == MissionFinishTypeEnum.GetTrialAvatar)
         {
             var ids = Player.LineupManager!.GetCurLineup()?.BaseAvatars?.ToList() ?? [];
-            ids.ForEach(async x => await Player.LineupManager!.RemoveAvatarFromCurTeam(x.BaseAvatarId, false));
+            foreach (var avatar in ids) await Player.LineupManager!.RemoveAvatarFromCurTeam(avatar.BaseAvatarId, false);
             ;
             await Player.LineupManager!.AddAvatarToCurTeam(subMission.SubMissionInfo.ParamInt1);
         }
@@ -278,9 +279,9 @@ public class LevelTask(PlayerInstance player)
         if (subMission.SubMissionInfo?.FinishType == MissionFinishTypeEnum.GetTrialAvatarList)
         {
             var ids = Player.LineupManager!.GetCurLineup()?.BaseAvatars?.ToList() ?? [];
-            ids.ForEach(async x => await Player.LineupManager!.RemoveAvatarFromCurTeam(x.BaseAvatarId, false));
-            subMission.SubMissionInfo.ParamIntList?.ForEach(
-                async x => await Player.LineupManager!.AddAvatarToCurTeam(x));
+            foreach (var avatar in ids) await Player.LineupManager!.RemoveAvatarFromCurTeam(avatar.BaseAvatarId, false);
+            foreach (var avatarId in subMission.SubMissionInfo.ParamIntList ?? [])
+                await Player.LineupManager!.AddAvatarToCurTeam(avatarId);
         }
 
         return null;
@@ -318,7 +319,7 @@ public class LevelTask(PlayerInstance player)
                 }
             }
 
-            list.ForEach(async x => await Player.LineupManager!.AddAvatarToCurTeam(x));
+            foreach (var avatarId in list) await Player.LineupManager!.AddAvatarToCurTeam(avatarId);
         }
 
         return null;
@@ -377,7 +378,7 @@ public class LevelTask(PlayerInstance player)
     {
         if (act is PropSetupUITrigger propSetupUiTrigger)
             foreach (var task in propSetupUiTrigger.ButtonCallback)
-                TriggerTask(task, subMission, group);
+                await TriggerTask(task, subMission, group);
 
         await ValueTask.CompletedTask;
 
@@ -396,7 +397,8 @@ public class LevelTask(PlayerInstance player)
             if (method != null)
             {
                 var resp = method.Invoke(this, [propStateExecute.TargetType, subMission, group]);
-                if (resp is EntityProp result) await result.SetState(propStateExecute.State);
+                var target = resp is ValueTask<object?> pending ? await pending : resp;
+                if (target is EntityProp result) await result.SetState(propStateExecute.State);
             }
         }
 

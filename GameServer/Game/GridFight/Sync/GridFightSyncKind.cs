@@ -13,4 +13,6 @@ public static class GridFightSyncKind
     public const int PostBattle = 7;
     public const int NoOp = 8;
     public const int PreSettle = 9;
+    public const int Preparation = 10;
+    public const int PosUpdate = 11;
 }

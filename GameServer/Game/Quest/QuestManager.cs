@@ -45,6 +45,7 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
         var syncList = new List<QuestInfo>();
         foreach (var quest in GameData.QuestDataData.Values)
         {
+            if (Player.DailyActivityManager?.IsDailyQuest(quest.QuestID) == true) continue;
             if (QuestData.Quests.ContainsKey(quest.QuestID)) continue; 
             QuestInfo? acceptQuest = null;
             switch (quest.UnlockType)
@@ -96,6 +97,7 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
     {
         if (!ConfigManager.Config.ServerOption.EnableQuest) return null;
 
+        if (Player.DailyActivityManager?.IsDailyQuest(questId) == true) return null;
         GameData.QuestDataData.TryGetValue(questId, out var questExcel);
         if (questExcel == null) return null;
 
@@ -130,6 +132,7 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
         questInfo.QuestStatus = QuestStatus.QuestFinish;
         questInfo.Progress = finishWayExcel.Progress;
         questInfo.FinishTime = DateTime.Now.ToUnixSec();
+        if (Player.DailyActivityManager != null) await Player.DailyActivityManager.OnQuestFinished(questId);
         if (push)
             await Player.SendPacket(new PacketPlayerSyncScNotify(questInfo));
         else
@@ -141,6 +144,7 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
 
     public async ValueTask<Retcode> FinishQuestByClient(int questId)
     {
+        if (Player.DailyActivityManager?.IsDailyQuest(questId) == true) return Retcode.RetQuestStatusError;
         if (!ConfigManager.Config.ServerOption.EnableQuest) return Retcode.RetSucc;
 
         GameData.QuestDataData.TryGetValue(questId, out var questExcel);
@@ -157,6 +161,7 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
         questInfo.QuestStatus = QuestStatus.QuestFinish;
         questInfo.Progress = finishWayExcel.Progress;
         questInfo.FinishTime = DateTime.Now.ToUnixSec();
+        if (Player.DailyActivityManager != null) await Player.DailyActivityManager.OnQuestFinished(questId);
         await Player.SendPacket(new PacketPlayerSyncScNotify(questInfo));
 
         
@@ -167,6 +172,8 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
 
     public async ValueTask<(Retcode, List<ItemData>?)> TakeQuestReward(int questId)
     {
+        if (Player.DailyActivityManager?.IsDailyQuest(questId) == true)
+            return await Player.DailyActivityManager.TakeQuestReward(questId);
         GameData.QuestDataData.TryGetValue(questId, out var questExcel);
         if (questExcel == null) return (Retcode.RetFail, null);
 
@@ -185,6 +192,7 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
 
     public async ValueTask<(Retcode, List<ItemData>)> TakeQuestOptionalReward(int questId, int optionalRewardId)
     {
+        if (Player.DailyActivityManager?.IsDailyQuest(questId) == true) return (Retcode.RetQuestStatusError, []);
         var rewards = new List<ItemData>();
 
         GameData.QuestDataData.TryGetValue(questId, out var questExcel);

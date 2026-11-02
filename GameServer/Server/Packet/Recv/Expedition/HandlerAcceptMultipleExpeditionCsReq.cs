@@ -13,6 +13,8 @@ public class HandlerAcceptMultipleExpeditionCsReq : Handler
         var player = connection.Player!;
         var accepted = player.ExpeditionManager!.AcceptMultipleExpedition(req.Expedition);
 
+        if (player.DailyActivityManager != null && req.Expedition.Any(x => accepted.Any(a => a.Id == x.Id)))
+            await player.DailyActivityManager.RecordProgress(2100133, 1);
         await connection.SendPacket(new PacketAcceptMultipleExpeditionScRsp(player, accepted));
     }
 }

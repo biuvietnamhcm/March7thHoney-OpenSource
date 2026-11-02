@@ -6,14 +6,14 @@ namespace March7thHoney.GameServer.Server.Packet.Send.DailyActive;
 
 public class PacketDailyActiveInfoNotify : BasePacket
 {
-    public PacketDailyActiveInfoNotify() : base(CmdIds.DailyActiveInfoNotify)
+    public PacketDailyActiveInfoNotify(DailyActivityManager manager) : base(CmdIds.DailyActiveInfoNotify)
     {
         var proto = new DailyActiveInfoNotify
         {
-            DailyActivePoint = DailyActiveDefaults.FixedPoint
+            DailyActivePoint = (uint)manager.Data.Points
         };
-        proto.DailyActiveLevelList.AddRange(DailyActiveDefaults.CreateLevels(true));
-        proto.DailyActiveQuestIdList.AddRange(DailyActiveDefaults.QuestIds);
+        proto.DailyActiveLevelList.AddRange(manager.ToLevels());
+        proto.DailyActiveQuestIdList.AddRange(manager.Data.QuestIds.Select(x => (uint)x));
         SetData(proto);
     }
 }

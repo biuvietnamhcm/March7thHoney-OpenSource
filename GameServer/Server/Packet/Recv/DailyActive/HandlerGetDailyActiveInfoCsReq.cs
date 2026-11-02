@@ -8,6 +8,8 @@ public class HandlerGetDailyActiveInfoCsReq : Handler
 {
     public override async Task OnHandle(Connection connection, byte[] header, byte[] data)
     {
-        await connection.SendPacket(new PacketGetDailyActiveInfoScRsp());
+        var manager = connection.Player!.DailyActivityManager!;
+        await manager.RefreshAsync();
+        await connection.SendPacket(new PacketGetDailyActiveInfoScRsp(manager));
     }
 }

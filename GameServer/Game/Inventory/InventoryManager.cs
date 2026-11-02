@@ -408,6 +408,7 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
         {
             case ItemMainTypeEnum.Material:
             case ItemMainTypeEnum.Pet:
+            case ItemMainTypeEnum.Mission:
             case ItemMainTypeEnum.Usable:
                 return Data.MaterialItems.Find(x => x.ItemId == itemId);
             case ItemMainTypeEnum.Equipment:
@@ -606,19 +607,28 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
 
     public async ValueTask<ItemData?> ComposeItem(int composeId, int count, List<ItemCost> costData)
     {
-        
-        foreach (var cost in costData)
-            await RemoveItem((int)cost.PileItem.ItemId, (int)cost.PileItem.ItemNum);
+        await _composeLock.WaitAsync();
+        try { return await ComposeItemCore(composeId, count, costData); }
+        finally { _composeLock.Release(); }
+    }
 
-        
-        GameData.ItemComposeConfigData.TryGetValue(composeId, out var composeConfig);
-        if (composeConfig == null) return null;
-        foreach (var cost in composeConfig.MaterialCost)
-            await RemoveItem(cost.ItemID, cost.ItemNum * count);
+    private readonly SemaphoreSlim _composeLock = new(1, 1);
 
-        await RemoveItem(2, composeConfig.CoinCost * count);
+    private async ValueTask<ItemData?> ComposeItemCore(int composeId, int count, List<ItemCost> costData)
+    {
+        if (count <= 0 || !GameData.ItemComposeConfigData.TryGetValue(composeId, out var composeConfig) ||
+            !GameData.ItemConfigData.ContainsKey(composeConfig.ItemID)) return null;
+        var costs = composeConfig.MaterialCost.Select(x => (Id: x.ItemID, Count: (long)x.ItemNum * count))
+            .Concat(costData.Where(x => x.PileItem != null).Select(x => (Id: (int)x.PileItem.ItemId, Count: (long)x.PileItem.ItemNum)))
+            .Append((Id: 2, Count: (long)composeConfig.CoinCost * count))
+            .GroupBy(x => x.Id).Select(x => (Id: x.Key, Count: x.Sum(y => y.Count))).ToList();
+        if (costs.Any(x => x.Count < 0 || x.Count > int.MaxValue || (GetItem(x.Id)?.Count ?? 0) < x.Count)) return null;
+        foreach (var cost in costs.Where(x => x.Count > 0)) await RemoveItem(cost.Id, (int)cost.Count);
 
-        return await AddItem(composeConfig.ItemID, count, false);
+        var result = await AddItem(composeConfig.ItemID, count, false);
+        if (result != null && count > 0 && Player.DailyActivityManager != null)
+            await Player.DailyActivityManager.OnItemComposed(count);
+        return result;
     }
 
     public async ValueTask<List<ItemData>> ComposeRelic(ComposeSelectedRelicCsReq req)

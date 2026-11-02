@@ -1,4 +1,5 @@
 using March7thHoney.GameServer.Game.GridFight;
+using March7thHoney.GameServer.Game.GridFight.Sync;
 using March7thHoney.GameServer.Server.Packet.Send.GridFight;
 using March7thHoney.Kcp;
 using March7thHoney.Proto;
@@ -15,13 +16,28 @@ public class HandlerGridFightUpdatePosCsReq : Handler
         var service = new GridFightService(player);
         if (service.Current == null)
         {
-            await connection.SendPacket(new PacketGridFightUpdatePosScRsp());
+            await connection.SendPacket(new PacketGridFightUpdatePosScRsp(Retcode.RetGridFightNotInGameplay));
             return;
         }
 
-        var posList = service.UpdatePos(req.GridFightPosInfoList);
+        var (posList, retcode, merges, syncPosList) = service.UpdatePos(req.GridFightPosInfoList);
 
-        await connection.SendPacket(new PacketGridFightUpdatePosScRsp(posList));
-        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(player, posList));
+        await connection.SendPacket(new PacketGridFightUpdatePosScRsp(retcode, retcode == Retcode.RetSucc ? posList : null));
+        if (retcode == Retcode.RetSucc)
+        {
+            await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(player, GridFightSyncKind.PosUpdate,
+                new PosUpdateSyncPayload
+                {
+                    UpdatedPosList = syncPosList,
+                    Merges = merges
+                }));
+
+            await GridFightMergeSyncHelper.SendMergeSyncsAsync(
+                connection,
+                player,
+                merges,
+                GridFightUpdateSrcType.LnpfefkjdhpMhncgoehmch);
+
+        }
     }
 }

@@ -103,6 +103,8 @@ public class ScenePropData
 {
     public int PropId { get; set; }
     public PropStateEnum State { get; set; }
+    // Stored inside the existing scene JSON column; older saves default to false.
+    public bool ChestOpened { get; set; }
 }
 
 public class SceneEraFlipperData

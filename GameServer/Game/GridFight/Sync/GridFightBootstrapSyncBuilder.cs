@@ -38,17 +38,7 @@ public static class GridFightBootstrapSyncBuilder
             ShopSyncInfo = new GridFightShopSyncInfo
             {
                 GLIFNMBMMBL = 2,
-                LDEDGOOKHFL = new FJPONJFLOOH
-                {
-                    EDJPMNLLGGB =
-                    {
-                        new MJJEHCBNOKI { MMKNFIFOPPA = 1, FLICPMGFKOK = 100 },
-                        new MJJEHCBNOKI { MMKNFIFOPPA = 2 },
-                        new MJJEHCBNOKI { MMKNFIFOPPA = 3 },
-                        new MJJEHCBNOKI { MMKNFIFOPPA = 4 },
-                        new MJJEHCBNOKI { MMKNFIFOPPA = 5 }
-                    }
-                },
+                LDEDGOOKHFL = GridFightInstance.BuildShopRarityDisplayInfoForLevel(3),
                 ShopGoodsList =
                 {
                     new GridFightShopGoodsInfo { ShopGoodsPrice = 1, RoleGoodsInfo = new GridFightRoleGoodsInfo { RoleId = 1217, RoleStar = 1 } },

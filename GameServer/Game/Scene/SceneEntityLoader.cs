@@ -311,6 +311,10 @@ public class SceneEntityLoader(SceneInstance scene)
         var timelineData = Scene.Player.GetScenePropTimelineData(Scene.FloorId, group.Id, info.ID);
         prop.PropTimelineData = timelineData;
 
+        // Also promote legacy ChestUsed saves to the durable claim flag.
+        if (prop.WasOpened)
+            await prop.SetState(PropStateEnum.ChestUsed, false);
+
         if (group.GroupName.Contains("Machine"))
         {
             await prop.SetState(PropStateEnum.Open);

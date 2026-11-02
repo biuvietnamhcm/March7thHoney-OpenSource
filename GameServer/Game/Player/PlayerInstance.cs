@@ -1,3 +1,4 @@
+using March7thHoney.GameServer.Game.DailyActive;
 using March7thHoney.Data;
 using March7thHoney.Database;
 using March7thHoney.Database.Avatar;
@@ -69,6 +70,7 @@ public partial class PlayerInstance(PlayerData data)
     #region Quest & Mission Managers
 
     public MissionManager? MissionManager { get; private set; }
+    public DailyActivityManager? DailyActivityManager { get; private set; }
     public QuestManager? QuestManager { get; private set; }
     public RaidManager? RaidManager { get; private set; }
     public StoryLineManager? StoryLineManager { get; private set; }
@@ -203,6 +205,7 @@ public partial class PlayerInstance(PlayerData data)
         RaidManager = new RaidManager(this);
         StoryLineManager = new StoryLineManager(this);
         QuestManager = new QuestManager(this);
+        DailyActivityManager = new DailyActivityManager(this);
         TrainPartyManager = new TrainPartyManager(this);
         TrainCakeCatchManager = new TrainCakeCatchManager(this);
         OfferingManager = new OfferingManager(this);
@@ -259,6 +262,7 @@ public partial class PlayerInstance(PlayerData data)
                 FriendRecordData.DevelopmentInfos.Remove(friendDevelopmentInfoPb);
 
         await QuestManager!.AcceptQuestByCondition();
+        await DailyActivityManager!.RefreshAsync();
     }
 
     public T InitializeDatabase<T>() where T : BaseDatabaseDataHelper, new()
@@ -448,7 +452,10 @@ public partial class PlayerInstance(PlayerData data)
 
     public async ValueTask SpendStamina(int staminaCost)
     {
-        Data.Stamina -= staminaCost;
+        if (staminaCost <= 0) return;
+        var spent = Math.Clamp(Data.Stamina, 0, staminaCost);
+        Data.Stamina -= spent;
+        if (DailyActivityManager != null) await DailyActivityManager.RecordProgress(2100139, spent);
         await SendPacket(new PacketStaminaInfoScNotify(this));
     }
 
@@ -510,6 +517,7 @@ public partial class PlayerInstance(PlayerData data)
 
     public async ValueTask OnHeartBeat()
     {
+        if (DailyActivityManager != null) await DailyActivityManager.RefreshAsync(true);
         await OnStaminaRecover();
 
         InvokeOnPlayerHeartBeat(this);

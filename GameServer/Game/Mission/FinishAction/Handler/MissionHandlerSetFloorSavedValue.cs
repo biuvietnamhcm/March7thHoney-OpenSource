@@ -22,6 +22,6 @@ public class MissionHandlerSetFloorSavedValue : MissionFinishActionHandler
         await player.SendPacket(
             new PacketUpdateFloorSavedValueNotify(paramString[2], int.Parse(paramString[3]), player));
 
-        player.TaskManager?.SceneTaskTrigger.TriggerFloor(plane, floor);
+        if (player.TaskManager != null) await player.TaskManager.SceneTaskTrigger.TriggerFloor(plane, floor);
     }
 }

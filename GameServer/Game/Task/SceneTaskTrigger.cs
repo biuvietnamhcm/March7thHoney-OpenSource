@@ -8,7 +8,7 @@ public class SceneTaskTrigger(PlayerInstance player)
 {
     public PlayerInstance Player { get; } = player;
 
-    public void TriggerFloor(int planeId, int floorId)
+    public async ValueTask TriggerFloor(int planeId, int floorId)
     {
         GameData.GetFloorInfo(planeId, floorId, out var floor);
         if (floor == null) return;
@@ -17,14 +17,14 @@ public class SceneTaskTrigger(PlayerInstance player)
         {
             if (group.LevelGraphConfig == null) continue;
             foreach (var task in group.LevelGraphConfig.OnInitSequece)
-                Player.TaskManager?.LevelTask.TriggerInitAct(task, new SubMissionData(0), group);
+                await Player.TaskManager!.LevelTask.TriggerInitAct(task, new SubMissionData(0), group);
 
             foreach (var task in group.LevelGraphConfig.OnStartSequece)
-                Player.TaskManager?.LevelTask.TriggerStartAct(task, new SubMissionData(0), group);
+                await Player.TaskManager!.LevelTask.TriggerStartAct(task, new SubMissionData(0), group);
         }
     }
 
-    public void TriggerGroup(int planeId, int floorId, int groupId)
+    public async ValueTask TriggerGroup(int planeId, int floorId, int groupId)
     {
         GameData.GetFloorInfo(planeId, floorId, out var floor);
         if (floor == null) return;
@@ -32,10 +32,10 @@ public class SceneTaskTrigger(PlayerInstance player)
         {
             if (group.LevelGraphConfig == null) return;
             foreach (var task in group.LevelGraphConfig.OnInitSequece)
-                Player.TaskManager?.LevelTask.TriggerInitAct(task, new SubMissionData(0), group);
+                await Player.TaskManager!.LevelTask.TriggerInitAct(task, new SubMissionData(0), group);
 
             foreach (var task in group.LevelGraphConfig.OnStartSequece)
-                Player.TaskManager?.LevelTask.TriggerStartAct(task, new SubMissionData(0), group);
+                await Player.TaskManager!.LevelTask.TriggerStartAct(task, new SubMissionData(0), group);
         }
     }
 }

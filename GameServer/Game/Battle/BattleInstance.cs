@@ -90,6 +90,11 @@ public class BattleInstance(PlayerInstance player, LineupInfo lineup, List<Stage
     public GridFightInstance? GridFightContext { get; set; }
     public CalyxOverrideContext? CalyxOverride { get; set; }
 
+    /// <summary>
+    /// Cached random seed so repeated battle-info queries stay stable for the same encounter.
+    /// </summary>
+    public uint? LogicRandomSeed { get; set; }
+
     public delegate ValueTask OnBattleEndDelegate(BattleInstance battle, PVEBattleResultCsReq req);
 
     public event OnBattleEndDelegate? OnBattleEnd;
@@ -242,7 +247,7 @@ public class BattleInstance(PlayerInstance player, LineupInfo lineup, List<Stage
             WorldLevel = (uint)WorldLevel,
             RoundsLimit = (uint)RoundLimit,
             StageId = (uint)StageId,
-            LogicRandomSeed = (uint)Random.Shared.Next()
+            LogicRandomSeed = LogicRandomSeed ?? (uint)Random.Shared.Next()
         };
 
         if (MagicInfo != null) proto.BattleRogueMagicInfo = MagicInfo;
@@ -321,14 +326,15 @@ public class BattleInstance(PlayerInstance player, LineupInfo lineup, List<Stage
             proto.BattleTargetInfo.Add((uint)i, battleTargetEntry);
         }
 
-        
-        foreach (var buff in GameData.AvatarGlobalBuffConfigData.Values)
-            if (Player.AvatarManager!.GetFormalAvatar(buff.AvatarID) != null)
-                
-                Buffs.Add(new MazeBuff(buff.MazeBuffID, 1, -1)
-                {
-                    WaveFlag = -1
-                });
+        if (GridFightContext == null)
+        {
+            foreach (var buff in GameData.AvatarGlobalBuffConfigData.Values)
+                if (Player.AvatarManager!.GetFormalAvatar(buff.AvatarID) != null)
+                    Buffs.Add(new MazeBuff(buff.MazeBuffID, 1, -1)
+                    {
+                        WaveFlag = -1
+                    });
+        }
 
         foreach (var buff in Buffs)
         {

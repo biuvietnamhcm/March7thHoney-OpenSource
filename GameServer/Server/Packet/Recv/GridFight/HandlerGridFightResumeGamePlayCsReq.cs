@@ -18,6 +18,9 @@ public class HandlerGridFightResumeGamePlayCsReq : Handler
 
         await connection.SendPacket(new PacketKMDHLENLIMF());
         await connection.SendPacket(new PacketINHDFEIOBNK(player));
-        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(player, GridFightSyncKind.Bootstrap));
+
+        var inst = player.GridFightManager!.GridFightInstance!;
+        if (inst.InitialBenchRolesSynced)
+            await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(player, GridFightSyncKind.Bootstrap));
     }
 }

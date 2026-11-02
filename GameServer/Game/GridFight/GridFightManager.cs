@@ -94,7 +94,15 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
         int kind = GridFightSyncKind.Bootstrap,
         object? extra = null)
     {
-        if (updatedPosList != null) return BuildPosUpdateSync(updatedPosList);
+        if (kind == GridFightSyncKind.PosUpdate)
+            return BuildPosUpdateSync(extra);
+        if (updatedPosList != null)
+        {
+            return BuildPosUpdateSync(new PosUpdateSyncPayload
+            {
+                UpdatedPosList = updatedPosList.ToList()
+            });
+        }
         return kind switch
         {
             GridFightSyncKind.Bootstrap      => BuildBootstrapSync(),
@@ -106,39 +114,214 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
             GridFightSyncKind.BuyExp         => BuildBuyExpSync(),
             GridFightSyncKind.PostBattle     => BuildPostBattleSync(),
             GridFightSyncKind.PreSettle      => BuildPreSettleSync(),
+            GridFightSyncKind.Preparation    => BuildPreparationStateSync(),
             GridFightSyncKind.NoOp           => new GridFightSyncUpdateResultScNotify(),
             _                                => new GridFightSyncUpdateResultScNotify()
         };
     }
 
-    private GridFightSyncUpdateResultScNotify BuildPosUpdateSync(IEnumerable<GridFightPosInfo> updatedPosList)
+    private GridFightSyncUpdateResultScNotify BuildPosUpdateSync(object? extra)
     {
         var notify = new GridFightSyncUpdateResultScNotify();
-        if (GridFightInstance == null) return notify;
-        var sync = new GridFightSyncResultData();
+        var inst = GridFightInstance;
+        if (inst == null) return notify;
+
+        List<GridFightPosInfo> updatedPosList = [];
+        List<GridFightInstance.RoleMergeResult> merges = [];
+        if (extra is PosUpdateSyncPayload payload)
+        {
+            updatedPosList = payload.UpdatedPosList;
+            merges = payload.Merges;
+        }
+        else if (extra is ValueTuple<IEnumerable<GridFightPosInfo>, List<GridFightInstance.RoleMergeResult>> tuple)
+        {
+            updatedPosList = tuple.Item1.ToList();
+            merges = tuple.Item2;
+        }
+        else if (extra is IEnumerable<GridFightPosInfo> list)
+        {
+            updatedPosList = list.ToList();
+        }
+
+        var sync = new GridFightSyncResultData { GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpHndkhmefaal };
+        var synced = new HashSet<uint>();
         foreach (var posInfo in updatedPosList)
         {
-            if (posInfo.Pos == 0 || posInfo.UniqueId == 0) continue;
-            if (!GridFightInstance.RoleByUniqueId.TryGetValue(posInfo.UniqueId, out var avatarId)) continue;
-            var roleInfo = new GridGameRoleInfo
-            {
-                Id = avatarId,
-                Pos = posInfo.Pos,
-                UniqueId = posInfo.UniqueId,
-                RoleStar = GridFightInstance.RoleStarByUniqueId.GetValueOrDefault(posInfo.UniqueId, 1u)
-            };
-            if (GameData.GridFightRoleBasicInfoData.TryGetValue(avatarId, out var roleExcel)
-                && roleExcel.RoleSavedValueList.Count > 0)
-            {
-                roleInfo.GridFightValueInitComponent[roleExcel.RoleSavedValueList[0]] = 0;
-            }
+            if (posInfo.UniqueId == 0 || !synced.Add(posInfo.UniqueId)) continue;
+            var rolePos = posInfo.Pos > 0
+                ? posInfo.Pos
+                : inst.UniqueIdByPos.FirstOrDefault(kv => kv.Value == posInfo.UniqueId).Key;
+            if (rolePos == 0) continue;
             sync.UpdateDynamicList.Add(new GridFightSyncData
             {
-                UpdateRoleInfo = roleInfo
+                UpdateRoleInfo = inst.BuildGridGameRoleInfo(posInfo.UniqueId, rolePos)
             });
         }
+
         notify.SyncResultDataList.Add(sync);
         return notify;
+    }
+
+    /// <summary>
+    /// 构建升星过渡动画 sync（数据与粒子参数同段，不含 RemoveRoleUniqueId 与最终星级）。
+    /// </summary>
+    public GridFightSyncUpdateResultScNotify BuildRoleMergeAnimationNotify(
+        GridFightInstance.RoleMergeResult merge,
+        GridFightUpdateSrcType updateSrc)
+    {
+        var notify = new GridFightSyncUpdateResultScNotify();
+        var inst = GridFightInstance;
+        if (inst == null || !merge.Merged) return notify;
+
+        var sec = new GridFightSyncResultData
+        {
+            GridUpdateSrc = updateSrc,
+            SyncEffectParamList = { merge.KeptUniqueId, merge.NewStar }
+        };
+        AppendRoleMergeAnimationEntries(sec, inst, merge);
+        notify.SyncResultDataList.Add(sec);
+        return notify;
+    }
+
+    /// <summary>
+    /// 构建升星收尾 sync（移除消耗卡、写入最终星级并清理备战席空位）。
+    /// </summary>
+    public GridFightSyncUpdateResultScNotify BuildRoleMergeFinalizeNotify(
+        GridFightInstance.RoleMergeResult merge)
+    {
+        var notify = new GridFightSyncUpdateResultScNotify();
+        var inst = GridFightInstance;
+        if (inst == null || !merge.Merged) return notify;
+
+        var sec = new GridFightSyncResultData
+        {
+            GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpHndkhmefaal
+        };
+        AppendRoleMergeFinalizeEntries(sec, inst, merge);
+        AppendEmptyBenchSlotClears(sec, inst);
+        notify.SyncResultDataList.Add(sec);
+        return notify;
+    }
+
+    /// <summary>
+    /// 向 sync 段追加升星动画触发字段（不下发移除与最终星级，避免客户端瞬间跳变）。
+    /// </summary>
+    private static void AppendRoleMergeAnimationEntries(
+        GridFightSyncResultData sec,
+        GridFightInstance inst,
+        GridFightInstance.RoleMergeResult merge)
+    {
+        if (!merge.Merged) return;
+
+        var mergeCtx = new CMCJNKPKBEM();
+        foreach (var (uid, pos) in merge.ParticipantPosByUniqueId)
+            mergeCtx.CFNPGNMPNDN[uid.ToString()] = pos;
+
+        if (!merge.ParticipantPosByUniqueId.ContainsKey(merge.KeptUniqueId))
+        {
+            var keepPos = inst.UniqueIdByPos.FirstOrDefault(kv => kv.Value == merge.KeptUniqueId).Key;
+            if (keepPos > 0)
+                mergeCtx.CFNPGNMPNDN[merge.KeptUniqueId.ToString()] = keepPos;
+        }
+
+        sec.UpdateDynamicList.Add(new GridFightSyncData { CFNPGNMPNDN = mergeCtx });
+
+        foreach (var snapshot in merge.PreMergeRoleSnapshots.Values.OrderBy(s => s.Pos))
+            sec.UpdateDynamicList.Add(new GridFightSyncData { UpdateRoleInfo = snapshot });
+
+        sec.UpdateDynamicList.Add(new GridFightSyncData { HLFBBANMJDJ = merge.KeptUniqueId });
+        sec.UpdateDynamicList.Add(new GridFightSyncData { GDPBJDHGFLB = merge.NewStar });
+        sec.UpdateDynamicList.Add(new GridFightSyncData
+        {
+            AJIMOAMGCII = GridFightRoleLookup.ToSyncRoleId(merge.RoleId)
+        });
+    }
+
+    /// <summary>
+    /// 向 sync 段追加升星收尾字段（移除消耗卡并同步保留卡最终星级）。
+    /// </summary>
+    private static void AppendRoleMergeFinalizeEntries(
+        GridFightSyncResultData sec,
+        GridFightInstance inst,
+        GridFightInstance.RoleMergeResult merge)
+    {
+        if (!merge.Merged) return;
+
+        foreach (var removedUid in merge.RemovedUniqueIds)
+            sec.UpdateDynamicList.Add(new GridFightSyncData { RemoveRoleUniqueId = removedUid });
+
+        var keeperInfo = merge.FinalKeeperRoleInfo ?? inst.BuildGridGameRoleInfo(merge.KeptUniqueId);
+        if (keeperInfo.UniqueId > 0)
+        {
+            sec.UpdateDynamicList.Add(new GridFightSyncData { UpdateRoleInfo = keeperInfo });
+        }
+    }
+
+    /// <summary>
+    /// 构建购买/复制 AddRoleInfo；升星消耗新卡时仍返回合成前快照，供客户端先看到三张参与卡。
+    /// </summary>
+    public static GridGameRoleInfo BuildPurchasedRoleAddInfo(
+        GridFightInstance inst,
+        uint roleUniqueId,
+        uint pos,
+        IEnumerable<GridFightInstance.RoleMergeResult> buyMerges)
+    {
+        foreach (var merge in buyMerges.Where(m => m.Merged))
+        {
+            if (merge.PreMergeRoleSnapshots.TryGetValue(roleUniqueId, out var snapshot))
+                return snapshot;
+        }
+
+        return inst.BuildGridGameRoleInfo(roleUniqueId, pos);
+    }
+
+    /// <summary>
+    /// 构建购买/复制后备战席压缩 sync；升星参与卡改由动画包下发，避免提前写入最终星级。
+    /// </summary>
+    public static GridGameRoleInfo? TryBuildBenchRepositionRoleInfo(
+        GridFightInstance inst,
+        GridFightPosInfo benchPos,
+        IEnumerable<GridFightInstance.RoleMergeResult> buyMerges)
+    {
+        if (benchPos.UniqueId == 0 || !inst.RoleByUniqueId.ContainsKey(benchPos.UniqueId))
+            return null;
+
+        foreach (var merge in buyMerges.Where(m => m.Merged))
+        {
+            if (merge.RemovedUniqueIds.Contains(benchPos.UniqueId))
+                return null;
+            if (merge.ParticipantPosByUniqueId.ContainsKey(benchPos.UniqueId))
+                return null;
+        }
+
+        var roleInfo = inst.BuildGridGameRoleInfo(benchPos.UniqueId, benchPos.Pos);
+        return roleInfo.UniqueId == 0 ? null : roleInfo;
+    }
+
+    /// <summary>
+    /// 追加出战席布局 sync（MaxBattleRoleNum + GridFightOffFieldMaxCount，无条件 13 格）。
+    /// </summary>
+    private static void AppendBattlefieldMetaSync(GridFightSyncResultData sync, GridFightInstance inst) =>
+        GridFightInstance.AppendBattlefieldLayoutSync(sync, inst);
+
+    /// <summary>
+    /// 对备战席空位下发占位清除，避免客户端仍保留已移除角色的隐式占用。
+    /// </summary>
+    private static void AppendEmptyBenchSlotClears(GridFightSyncResultData sec, GridFightInstance inst)
+    {
+        var occupiedBenchPos = inst.UniqueIdByPos
+            .Where(kv => kv.Key is >= GridFightInstance.BenchPosMin and <= GridFightInstance.BenchPosMax && kv.Value != 0)
+            .Select(kv => kv.Key)
+            .ToHashSet();
+
+        for (uint pos = GridFightInstance.BenchPosMin; pos <= GridFightInstance.BenchPosMax; pos++)
+        {
+            if (occupiedBenchPos.Contains(pos)) continue;
+            sec.UpdateDynamicList.Add(new GridFightSyncData
+            {
+                UpdateRoleInfo = new GridGameRoleInfo { Pos = pos, UniqueId = 0, Id = 0, RoleStar = 0 }
+            });
+        }
     }
 
     private GridFightSyncUpdateResultScNotify BuildPendingAdvanceSync(object? extra)
@@ -171,6 +354,101 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
             notify.SyncResultDataList.Add(pendingSync);
         }
         return notify;
+    }
+
+    /// <summary>
+    /// Pushes gold, HP, chapter/section, shop and deployment cap when entering preparation.
+    /// </summary>
+    private GridFightSyncUpdateResultScNotify BuildPreparationStateSync()
+    {
+        var notify = new GridFightSyncUpdateResultScNotify();
+        var inst = GridFightInstance;
+        if (inst == null) return notify;
+
+        notify.SyncResultDataList.Add(BuildPreparationSyncResultData(inst));
+        return notify;
+    }
+
+    /// <summary>
+    /// 构建返回备战界面的合并 sync：解锁、完整备战状态、商店打开段（单包下发，避免自动开商店时状态不同步）。
+    /// </summary>
+    public GridFightSyncUpdateResultScNotify BuildReturnPreparationNotify(uint ackPos)
+    {
+        var notify = new GridFightSyncUpdateResultScNotify();
+        var inst = GridFightInstance;
+        if (inst == null) return notify;
+
+        EnsureNextBattleConfigured(inst);
+
+        var finishSync = new GridFightSyncResultData();
+        finishSync.UpdateDynamicList.Add(new GridFightSyncData { FinishPendingActionPos = ackPos });
+        finishSync.UpdateDynamicList.Add(new GridFightSyncData { SyncLockInfo = new GridFightLockInfo() });
+        notify.SyncResultDataList.Add(finishSync);
+        notify.SyncResultDataList.Add(BuildPreparationSyncResultData(inst));
+        notify.SyncResultDataList.Add(BuildShopOpenSyncResultData(inst));
+        return notify;
+    }
+
+    /// <summary>
+    /// 在下发备战 sync 前解析并缓存下一战遭遇，确保节点地图与商店 UI 绑定正确关卡。
+    /// </summary>
+    private static void EnsureNextBattleConfigured(GridFightInstance inst)
+    {
+        if (!GridFightLevelResolver.IsCombatNode(inst) || !inst.NeedsBattleEncounterConfiguration())
+            return;
+
+        var encounter = GridFightLevelResolver.Resolve(inst);
+        inst.ConfigureNextBattle(encounter.StageId, encounter.Monsters.Select(m => m.MonsterId));
+    }
+
+    /// <summary>
+    /// 构建进入备战阶段的完整状态 sync 段。
+    /// </summary>
+    private GridFightSyncResultData BuildPreparationSyncResultData(GridFightInstance inst)
+    {
+        var sync = new GridFightSyncResultData { GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpEjkejdnhioe };
+        sync.UpdateDynamicList.Add(new GridFightSyncData { ItemValue = inst.Gold });
+        sync.UpdateDynamicList.Add(new GridFightSyncData { ShopSyncInfo = BuildShopSyncInfo(inst) });
+        sync.UpdateDynamicList.Add(new GridFightSyncData
+        {
+            GridFightLineupHp = new GridFightLineupHpSyncInfo
+            {
+                GridFightLineupHp = inst.LineupHp,
+                GridFightLineupMaxHp = inst.LineupMaxHp
+            }
+        });
+        sync.UpdateDynamicList.Add(new GridFightSyncData
+        {
+            LevelSyncInfo = new GridFightLevelSyncInfo
+            {
+                DCPKPNLKGMM = inst.CurrentChapterId,
+                SectionId = inst.SectionId,
+                GridFightLayerInfo = inst.BuildCurrentLayerInfo()
+            }
+        });
+        sync.UpdateDynamicList.Add(new GridFightSyncData
+        {
+            PlayerLevel = new GridFightPlayerLevelSyncInfo
+            {
+                Level = inst.PlayerLevel,
+                Exp = inst.PlayerExp,
+                MaxLevel = inst.PlayerMaxLevel
+            }
+        });
+        AppendBattlefieldMetaSync(sync, inst);
+        return sync;
+    }
+
+    /// <summary>
+    /// 构建客户端打开商店界面所需的 sync 段（与购买后刷新商店格式一致）。
+    /// </summary>
+    private GridFightSyncResultData BuildShopOpenSyncResultData(GridFightInstance inst)
+    {
+        var sync = new GridFightSyncResultData { GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpDpekjiiicgh };
+        sync.SyncEffectParamList.Add(0u);
+        sync.UpdateDynamicList.Add(new GridFightSyncData { ItemValue = inst.Gold });
+        sync.UpdateDynamicList.Add(new GridFightSyncData { ShopSyncInfo = BuildShopSyncInfo(inst) });
+        return sync;
     }
 
     private GridFightSyncUpdateResultScNotify BuildSelectEquipSync(object? extra)
@@ -206,22 +484,45 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
             notify.SyncResultDataList.Add(new GridFightSyncResultData());
             return notify;
         }
+
         uint roleId;
         uint roleUniqueId;
         uint pos;
-        List<uint> mergedRemoved;
-        uint mergedKeepUid;
-        uint mergedNewStar;
-        if (extra is ValueTuple<uint, uint, uint, int, List<uint>, uint, uint> v2)
+        List<GridFightInstance.RoleMergeResult> buyMerges = [];
+        List<GridFightPosInfo> benchRepositions = [];
+        uint shopIndex = 0;
+        uint purchasedAugmentId = 0;
+        uint purchasedAugmentTargetUniqueId = 0;
+        if (extra is BuyGoodsSyncPayload payload)
         {
-            (roleId, roleUniqueId, pos, _, mergedRemoved, mergedKeepUid, mergedNewStar) = v2;
+            roleId = payload.RoleId;
+            roleUniqueId = payload.RoleUniqueId;
+            pos = payload.Pos;
+            buyMerges = payload.Merges;
+            benchRepositions = payload.BenchRepositions;
+            shopIndex = payload.ShopIndex;
+            purchasedAugmentId = payload.PurchasedAugmentId;
+            purchasedAugmentTargetUniqueId = payload.PurchasedAugmentTargetUniqueId;
+        }
+        else if (extra is ValueTuple<uint, uint, uint, int, List<uint>, uint, uint> v2)
+        {
+            (roleId, roleUniqueId, pos, _, var mergedRemoved, var mergedKeepUid, _) = v2;
+            if (mergedRemoved.Count > 0 && mergedKeepUid > 0)
+            {
+                var legacyMerge = new GridFightInstance.RoleMergeResult
+                {
+                    KeptUniqueId = mergedKeepUid,
+                    NewStar = inst.RoleStarByUniqueId.GetValueOrDefault(mergedKeepUid, 1u),
+                    RoleId = roleId
+                };
+                foreach (var uid in mergedRemoved)
+                    legacyMerge.RemovedUniqueIds.Add(uid);
+                buyMerges.Add(legacyMerge);
+            }
         }
         else if (extra is ValueTuple<uint, uint, uint, int> v1)
         {
             (roleId, roleUniqueId, pos, _) = v1;
-            mergedRemoved = [];
-            mergedKeepUid = 0;
-            mergedNewStar = 0;
         }
         else
         {
@@ -230,53 +531,45 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
         }
 
         var sec0 = new GridFightSyncResultData { GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpDpekjiiicgh };
-        sec0.SyncEffectParamList.Add(0u);
+        sec0.SyncEffectParamList.Add(shopIndex);
         sec0.UpdateDynamicList.Add(new GridFightSyncData { ItemValue = inst.Gold });
+        foreach (var benchPos in benchRepositions)
+        {
+            var roleInfo = TryBuildBenchRepositionRoleInfo(inst, benchPos, buyMerges);
+            if (roleInfo == null) continue;
+            sec0.UpdateDynamicList.Add(new GridFightSyncData { UpdateRoleInfo = roleInfo });
+        }
         if (roleUniqueId > 0)
         {
-            if (mergedRemoved.Count == 0 || mergedKeepUid == 0)
+            sec0.UpdateDynamicList.Add(new GridFightSyncData
             {
-                var roleInfo = new GridGameRoleInfo
-                {
-                    Id = roleId,
-                    Pos = pos,
-                    RoleStar = 1,
-                    UniqueId = roleUniqueId
-                };
-                if (GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var roleExcel)
-                    && roleExcel.RoleSavedValueList.Count > 0)
-                {
-                    roleInfo.GridFightValueInitComponent[roleExcel.RoleSavedValueList[0]] = 0;
-                }
-                sec0.UpdateDynamicList.Add(new GridFightSyncData { AddRoleInfo = roleInfo });
-            }
-            else
-            {
-                foreach (var removedUid in mergedRemoved)
-                    sec0.UpdateDynamicList.Add(new GridFightSyncData { RemoveRoleUniqueId = removedUid });
-
-                var keepPos = inst.UniqueIdByPos.FirstOrDefault(kv => kv.Value == mergedKeepUid).Key;
-                var mergedRole = new GridGameRoleInfo
-                {
-                    Id = roleId,
-                    Pos = keepPos,
-                    RoleStar = mergedNewStar,
-                    UniqueId = mergedKeepUid
-                };
-                if (GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var roleExcel)
-                    && roleExcel.RoleSavedValueList.Count > 0)
-                {
-                    mergedRole.GridFightValueInitComponent[roleExcel.RoleSavedValueList[0]] = 0;
-                }
-
-                
-                
-                if (mergedKeepUid == roleUniqueId)
-                    sec0.UpdateDynamicList.Add(new GridFightSyncData { AddRoleInfo = mergedRole });
-                else
-                    sec0.UpdateDynamicList.Add(new GridFightSyncData { UpdateRoleInfo = mergedRole });
-            }
+                AddRoleInfo = BuildPurchasedRoleAddInfo(inst, roleUniqueId, pos, buyMerges)
+            });
         }
+
+        if (purchasedAugmentId > 0 && purchasedAugmentTargetUniqueId > 0)
+        {
+            sec0.UpdateDynamicList.Add(new GridFightSyncData { HLFBBANMJDJ = purchasedAugmentTargetUniqueId });
+            sec0.UpdateDynamicList.Add(new GridFightSyncData
+            {
+                UpdateRoleInfo = inst.BuildGridGameRoleInfo(purchasedAugmentTargetUniqueId)
+            });
+            sec0.UpdateDynamicList.Add(new GridFightSyncData
+            {
+                GridGameAugmentUpdate = new GridFightGameAugmentUpdate
+                {
+                    UpdateAugmentInfo = new GridGameAugmentInfo
+                    {
+                        AugmentId = purchasedAugmentId,
+                        NDCFBKJDPAH = true,
+                        MHMLMKDFJLN = true
+                    }
+                }
+            });
+            GridFightInstance.AppendRoleAugmentBindingSync(sec0, inst, purchasedAugmentTargetUniqueId, purchasedAugmentId);
+        }
+
+        AppendBattlefieldMetaSync(sec0, inst);
         notify.SyncResultDataList.Add(sec0);
 
         var sec1 = new GridFightSyncResultData { GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpDpekjiiicgh };
@@ -287,22 +580,29 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
         return notify;
     }
 
+    /// <summary>
+    /// 构建商店刷新 sync（syncEffectParam：0 常规，1 免费刷新动画）。
+    /// </summary>
+    public GridFightSyncUpdateResultScNotify BuildShopRefreshNotify(uint syncEffectParam = 0)
+    {
+        var notify = new GridFightSyncUpdateResultScNotify();
+        var inst = GridFightInstance;
+        if (inst == null) return notify;
+
+        var sec = new GridFightSyncResultData { GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpDpekjiiicgh };
+        sec.SyncEffectParamList.Add(syncEffectParam);
+        sec.UpdateDynamicList.Add(new GridFightSyncData { ItemValue = inst.Gold });
+        sec.UpdateDynamicList.Add(new GridFightSyncData { ShopSyncInfo = BuildShopSyncInfo(inst) });
+        notify.SyncResultDataList.Add(sec);
+        return notify;
+    }
+
     private static GridFightShopSyncInfo BuildShopSyncInfo(GridFightInstance inst)
     {
         var shopSync = new GridFightShopSyncInfo
         {
             GLIFNMBMMBL = inst.ShopRefreshLeft,
-            LDEDGOOKHFL = new FJPONJFLOOH
-            {
-                EDJPMNLLGGB =
-                {
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 1, FLICPMGFKOK = 100 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 2 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 3 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 4 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 5 }
-                }
-            }
+            LDEDGOOKHFL = inst.BuildShopRarityDisplayInfo(),
         };
         foreach (var goods in inst.ShopGoods)
             shopSync.ShopGoodsList.Add(goods);
@@ -357,9 +657,10 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
             {
                 GridFightBuyExpCost = inst.GetBuyExpCost()
             });
+            GridFightInstance.AppendBattlefieldLayoutSync(sync, inst);
             sync.UpdateDynamicList.Add(new GridFightSyncData
             {
-                MaxBattleRoleNum = inst.GetCurrentMaxBattleRoleNum()
+                ShopSyncInfo = new GridFightShopSyncInfo { LDEDGOOKHFL = inst.BuildShopRarityDisplayInfo() }
             });
         }
         notify.SyncResultDataList.Add(sync);
@@ -608,10 +909,10 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
             foreach (var (pos, uniqueId) in inst.UniqueIdByPos.OrderBy(kv => kv.Key))
             {
                 if (pos == 0 || pos > 13) continue;
-                if (uniqueId == 0 || !inst.RoleByUniqueId.TryGetValue(uniqueId, out var roleId)) continue;
+                if (uniqueId == 0 || !inst.RoleByUniqueId.TryGetValue(uniqueId, out var roleKey)) continue;
                 notify.EDKJMPACHNJ.GridGameRoleList.Add(new GridGameRoleInfo
                 {
-                    Id = roleId,
+                    Id = GridFightRoleLookup.ToSyncRoleId(roleKey),
                     Pos = pos,
                     UniqueId = uniqueId,
                     RoleStar = inst.RoleStarByUniqueId.GetValueOrDefault(uniqueId, 1u)
@@ -652,6 +953,7 @@ public class GridFightManager(PlayerInstance player) : BasePlayerManager(player)
 
         GridFightInstance = new GridFightInstance(Player, season == 0 ? 1u : season,
             divisionId == 0 ? MaxDivisionId() : divisionId, isOverLock, ++CurUniqueId);
+        GridFightInstance.EnsureRouteBinding();
         return (Retcode.RetSucc, GridFightInstance);
     }
 }

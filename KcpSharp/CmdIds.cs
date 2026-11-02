@@ -803,6 +803,8 @@ public class CmdIds
     public const int AKHODIIOGDJ = 8466;
     public const int KMOFOOGIDOP = 8610;
     public const int GridFightBuyExpCsReq = 8708;
+    public const int GridFightGetDataPostSyncCsReq = 8707;
+    public const int GridFightGetDataPostSyncScRsp = 8704;
     public const int DJCHCHCAJPB = 8509;
     public const int GridFightRefreshShopCsReq = 8660;
     public const int CMJCEEDCIAN = 8658;

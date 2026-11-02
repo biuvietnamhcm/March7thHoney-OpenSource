@@ -363,7 +363,11 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 /GameServer/OriginalProto
-Resources/
+# Local game resource packs (common capitalizations, singular or plural).
+[Rr]esources/
+[Rr]esource/
+# Self-contained server output, including its local config and database.
+/artifacts/standalone/
 Config/Handbook
 Config/Logs
 Config/Plugins

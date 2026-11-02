@@ -1,6 +1,7 @@
 using March7thHoney.Data;
 using March7thHoney.Database.Avatar;
 using March7thHoney.GameServer.Game.Battle;
+using March7thHoney.GameServer.Game.GridFight;
 using March7thHoney.GameServer.Game.Lineup;
 using March7thHoney.GameServer.Game.Player;
 using March7thHoney.Proto;
@@ -18,30 +19,39 @@ public static class GridFightBattleProtoBuilder
 
         var collection = new PlayerDataCollection(player.Data, player.InventoryManager!.Data, battle.Lineup);
 
-        foreach (var (roleId, _) in inst.ResolveForegroundRoles())
+        foreach (var (roleKey, pos) in inst.ResolveForegroundRoles())
         {
-            var resolved = ResolveBattleAvatar(player, roleId);
+            var resolved = ResolveForegroundBattleAvatar(player, roleKey);
             var avatar = resolved.Avatar;
             if (avatar == null) continue;
-            proto.BattleAvatarList.Add(avatar.ToBattleProto(collection, resolved.AvatarType));
-            foregroundData.Add(new AvatarLineupData(avatar, resolved.AvatarType));
+
+            var battleAvatar = avatar.ToBattleProto(collection, AvatarType.AvatarTrialType);
+            battleAvatar.Index = pos;
+            proto.BattleAvatarList.Add(battleAvatar);
+            foregroundData.Add(new AvatarLineupData(avatar, AvatarType.AvatarTrialType));
         }
 
         proto.MonsterWaveList.Clear();
-        
-        
+
+        var stageId = inst.BattleComponent.StageId > 0 ? inst.BattleComponent.StageId : enc.StageId;
+        var monsterSpecs = inst.BattleComponent.MonsterIds.Count > 0
+            ? inst.BattleComponent.MonsterIds.Select(id => new GridFightMonsterSpec(id, 1u, [])).ToList()
+            : enc.Monsters;
+
+        proto.StageId = stageId;
+
         var monsterWorldLevel = (uint)Math.Max(1, battle.Player.Data.WorldLevel - 1);
         var wave = new SceneMonsterWave
         {
-            BattleStageId = (uint)battle.StageId,
+            BattleStageId = stageId,
             BattleWaveId = 1,
             MonsterParam = new SceneMonsterWaveParam
             {
-                EliteGroup = enc.EliteGroupId,
+                EliteGroup = inst.ResolveEliteGroupForCurrentSection(),
                 BDCCEFHMFHO = monsterWorldLevel
             }
         };
-        foreach (var spec in enc.Monsters)
+        foreach (var spec in monsterSpecs)
         {
             var sceneMonster = new SceneMonster
             {
@@ -60,12 +70,17 @@ public static class GridFightBattleProtoBuilder
                     Num = 1
                 });
             }
+
             wave.MonsterList.Add(sceneMonster);
         }
+
         proto.MonsterWaveList.Add(wave);
 
         foreach (var buffId in enc.BindingBuffs)
+        {
+            if (battle.Buffs.Any(b => b.BuffID == (int)buffId)) continue;
             battle.Buffs.Add(new MazeBuff((int)buffId, 1, -1) { WaveFlag = -1 });
+        }
 
         foreach (var beId in enc.BattleEvents)
             battle.BattleEvents.TryAdd((int)beId, new BattleEventInstance((int)beId, 0, 100000));
@@ -73,17 +88,41 @@ public static class GridFightBattleProtoBuilder
         return foregroundData;
     }
 
-    internal static (BaseAvatarInfo? Avatar, AvatarType AvatarType) ResolveBattleAvatar(PlayerInstance player, uint roleId)
+    /// <summary>
+    /// Resolves a foreground board role as a Grid Fight trial avatar (pos 1-4).
+    /// </summary>
+    internal static (BaseAvatarInfo? Avatar, AvatarType AvatarType) ResolveForegroundBattleAvatar(
+        PlayerInstance player, uint roleKey)
     {
-        if (!GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var basicInfo))
+        var basicInfo = GridFightRoleLookup.Find(roleKey);
+        if (basicInfo == null)
             return (null, AvatarType.AvatarTrialType);
+
+        var trial = player.AvatarManager?.GetTrialAvatarByWorldLevel(
+            (int)basicInfo.SpecialAvatarID, player.Data.WorldLevel);
+        if (trial != null)
+            return (trial, AvatarType.AvatarTrialType);
+
+        var formal = player.AvatarManager?.GetFormalAvatar((int)basicInfo.AvatarID);
+        return (formal, AvatarType.AvatarTrialType);
+    }
+
+    /// <summary>
+    /// Resolves a background board role for Grid Fight battle payloads (pos 5-13).
+    /// </summary>
+    internal static (BaseAvatarInfo? Avatar, AvatarType AvatarType) ResolveBackgroundBattleAvatar(
+        PlayerInstance player, uint roleKey)
+    {
+        var basicInfo = GridFightRoleLookup.Find(roleKey);
+        if (basicInfo == null)
+            return (null, AvatarType.AvatarGridFightType);
 
         var formal = player.AvatarManager?.GetFormalAvatar((int)basicInfo.AvatarID);
         if (formal != null)
-            return (formal, AvatarType.AvatarFormalType);
+            return (formal, AvatarType.AvatarGridFightType);
 
-        var trial = player.AvatarManager?.GetTrialAvatarByWorldLevel((int)basicInfo.SpecialAvatarID, player.Data.WorldLevel);
-        return (trial, AvatarType.AvatarTrialType);
+        var trial = player.AvatarManager?.GetTrialAvatarByWorldLevel(
+            (int)basicInfo.SpecialAvatarID, player.Data.WorldLevel);
+        return (trial, AvatarType.AvatarGridFightType);
     }
-
 }

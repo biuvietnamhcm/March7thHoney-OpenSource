@@ -22,6 +22,10 @@ public class HandlerPlayerLoginFinishCsReq : Handler
 
         await connection.SendPacket(new PacketFinishedMissionScNotify(
             player?.MissionManager?.GetAllFinishedMissionIds() ?? []));
-        await connection.SendPacket(new PacketDailyActiveInfoNotify());
+        if (player?.DailyActivityManager != null)
+        {
+            await player.DailyActivityManager.RefreshAsync();
+            await player.DailyActivityManager.SyncAsync();
+        }
     }
 }

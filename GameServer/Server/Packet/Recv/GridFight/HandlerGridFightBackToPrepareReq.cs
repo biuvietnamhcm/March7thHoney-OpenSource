@@ -1,3 +1,4 @@
+using March7thHoney.GameServer.Game.GridFight.Battle;
 using March7thHoney.GameServer.Game.GridFight.Sync;
 using March7thHoney.GameServer.Game.GridFight;
 using March7thHoney.GameServer.Server.Packet.Send.GridFight;
@@ -25,10 +26,15 @@ public class HandlerGridFightBackToPrepareReq : Handler
 
         await connection.SendPacket(new PacketGDMIIBNJJEJ());
 
-        
         if (inst.PendingAction?.ReturnPreparationAction == null)
         {
-            await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(player, GridFightSyncKind.NoOp));
+            if (GridFightLevelResolver.IsCombatNode(inst) && inst.NeedsBattleEncounterConfiguration())
+            {
+                var encounter = GridFightLevelResolver.Resolve(inst);
+                inst.ConfigureNextBattle(encounter.StageId, encounter.Monsters.Select(m => m.MonsterId));
+            }
+
+            await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(player, GridFightSyncKind.Preparation));
             return;
         }
 

@@ -1,5 +1,6 @@
 using March7thHoney.Data;
 using March7thHoney.Data.Excel;
+using March7thHoney.GameServer.Game.GridFight;
 
 namespace March7thHoney.GameServer.Game.GridFight.Battle;
 
@@ -253,7 +254,8 @@ public static class GridFightLevelResolver
                      .Select(uid => inst.RoleByUniqueId.GetValueOrDefault(uid))
                      .Where(r => r != 0))
         {
-            if (!GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var info)) continue;
+            var info = GridFightRoleLookup.Find(roleId);
+            if (info == null) continue;
             foreach (var t in info.TraitList) set.Add(t);
         }
         return set.ToList();

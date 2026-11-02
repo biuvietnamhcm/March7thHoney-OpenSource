@@ -1,4 +1,7 @@
 using March7thHoney.Enums.Avatar;
+using March7thHoney.Enums.Mission;
+using March7thHoney.Database;
+using March7thHoney.Util;
 using March7thHoney.GameServer.Server.Packet.Send.Player;
 using March7thHoney.GameServer.Server.Packet.Send.PlayerSync;
 using March7thHoney.Kcp;
@@ -15,7 +18,9 @@ public class HandlerSetPlayerInfoCsReq : Handler
         var req = SetPlayerInfoCsReq.Parser.ParseFrom(data);
         if (req == null) return;
         player.Data.Name = req.Nickname;
-        if (req.Gender == Gender.None || player.Data.IsGenderSet)
+        if (req.Gender is not (Gender.Man or Gender.Woman) || player.Data.IsGenderSet ||
+            (ConfigManager.Config.ServerOption.EnableMission &&
+             player.MissionManager!.GetSubMissionStatus(100010134) != MissionPhaseEnum.Accept))
         {
             await connection.SendPacket(new PacketSetPlayerInfoScRsp(player, req.IsModify));
             await connection.SendPacket(new PacketPlayerSyncScNotify(player.ToProto()));
@@ -34,6 +39,7 @@ public class HandlerSetPlayerInfoCsReq : Handler
         await player.LineupManager!.AddAvatarToCurTeam(heroAvatarId);
         await player.LineupManager!.AddAvatarToCurTeam(1001);
         await player.MissionManager!.FinishSubMission(100010134);
+        DatabaseHelper.Instance?.SaveUidData(player.Uid);
 
         await connection.SendPacket(new PacketSetPlayerInfoScRsp(player, req.IsModify));
         await connection.SendPacket(new PacketPlayerSyncScNotify(player.ToProto()));

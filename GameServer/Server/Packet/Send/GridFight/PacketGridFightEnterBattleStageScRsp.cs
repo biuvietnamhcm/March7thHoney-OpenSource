@@ -17,7 +17,10 @@ public class PacketGridFightEnterBattleStageScRsp : BasePacket
         if (inst == null || battle == null)
             proto.Retcode = (uint)Retcode.RetFail;
         else
+        {
+            proto.Retcode = (uint)Retcode.RetSucc;
             proto.BattleInfo = BuildBattleInfo(inst, battle);
+        }
         SetData(proto);
     }
 
@@ -44,7 +47,7 @@ public class PacketGridFightEnterBattleStageScRsp : BasePacket
             {
                 BNLHIMHFGDK = 1,
                 DCPKPNLKGMM = inst.CurrentChapterId,
-                NDOCIKPLKIF = inst.NDOCIKPLKIF,
+                NDOCIKPLKIF = inst.ResolveEliteGroupForCurrentSection(),
                 SectionId = inst.SectionId
             }
         };
@@ -56,24 +59,32 @@ public class PacketGridFightEnterBattleStageScRsp : BasePacket
         foreach (var portalBuffId in inst.ActivePortalBuffIds)
             info.AFCMOOFGBPK.GridFightPortalBuffList.Add(new MMDJJDEJMMN { PortalBuffId = portalBuffId });
 
-        foreach (var (roleId, _) in inst.UniqueIdByPos
+        foreach (var (roleKey, _) in inst.UniqueIdByPos
                      .OrderBy(kv => kv.Key)
                      .Where(kv => kv.Key > 0 && kv.Key <= 13 && kv.Value != 0 && inst.RoleByUniqueId.ContainsKey(kv.Value))
-                     .Select(kv => (RoleId: inst.RoleByUniqueId[kv.Value], Pos: kv.Key)))
+                     .Select(kv => (RoleKey: inst.RoleByUniqueId[kv.Value], Pos: kv.Key)))
         {
-            if (!GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var basicInfo)) continue;
+            var basicInfo = GridFightRoleLookup.Find(roleKey);
+            if (basicInfo == null) continue;
             foreach (var savedValue in basicInfo.RoleSavedValueList)
                 info.AFCMOOFGBPK.OGHGLMGJGEM[savedValue] = 0;
         }
         var player = battle.Player;
         var collection = new PlayerDataCollection(player.Data, player.InventoryManager!.Data, battle.Lineup);
-        foreach (var (roleId, _) in inst.ResolveBackgroundRoles())
+        foreach (var (roleKey, pos) in inst.ResolveBackgroundRoles())
         {
-            var resolved = GridFightBattleProtoBuilder.ResolveBattleAvatar(player, roleId);
+            var resolved = GridFightBattleProtoBuilder.ResolveBackgroundBattleAvatar(player, roleKey);
             var avatar = resolved.Avatar;
             if (avatar == null) continue;
-            var ba = avatar.ToBattleProto(collection, resolved.AvatarType);
-            ba.Id = (uint)(GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var bi) ? bi.AvatarID : roleId);
+            var ba = avatar.ToBattleProto(collection, AvatarType.AvatarGridFightType);
+            ba.Id = GridFightRoleLookup.ToAvatarId(roleKey);
+            ba.Index = pos;
+            if (ba.Level < 80)
+            {
+                ba.Level = 80;
+                ba.Promotion = 6;
+            }
+
             info.AFCMOOFGBPK.PIDIGFGKAMK.Add(ba);
         }
 
@@ -83,18 +94,21 @@ public class PacketGridFightEnterBattleStageScRsp : BasePacket
         foreach (var (pos, uniqueId) in inst.UniqueIdByPos.OrderBy(kv => kv.Key))
         {
             if (pos == 0 || pos > 13) continue;
-            if (uniqueId == 0 || !inst.RoleByUniqueId.TryGetValue(uniqueId, out var roleId)) continue;
-            var avatarId = GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var bi) ? bi.AvatarID : roleId;
+            if (uniqueId == 0 || !inst.RoleByUniqueId.TryGetValue(uniqueId, out var roleKey)) continue;
+            var basicInfo = GridFightRoleLookup.Find(roleKey);
 
+            var boundAugmentId = inst.GetPrimaryRoleAugmentId(uniqueId);
             var roleInfo = new JAJOBJJPINN
             {
-                RoleId = roleId,
-                AvatarId = avatarId,
+                RoleId = basicInfo?.ID ?? roleKey,
+                AvatarId = basicInfo?.AvatarID ?? roleKey,
                 Pos = pos,
                 UniqueId = uniqueId,
                 RoleStar = inst.RoleStarByUniqueId.GetValueOrDefault(uniqueId, 1u),
                 GJEHIGGNIAP = new IFDFHPAMHCL()
             };
+            if (boundAugmentId > 0)
+                roleInfo.GJEHIGGNIAP.KKMBLCJHAHK = boundAugmentId;
             roleInfo.ConvertPropertyToFixpoint.Add(32, 180);
             roleInfo.ConvertPropertyToFixpoint.Add(33, 480);
             roleInfo.ConvertPropertyToFixpoint.Add(34, 440);
@@ -124,6 +138,12 @@ public class PacketGridFightEnterBattleStageScRsp : BasePacket
             }
 
             info.AFCMOOFGBPK.GridGameRoleList.Add(roleInfo);
+
+            if (inst.RoleAugmentIdsByUniqueId.TryGetValue(uniqueId, out var roleAugments))
+            {
+                foreach (var augmentId in roleAugments)
+                    info.AFCMOOFGBPK.MMAJCLACOBN.Add(inst.BuildBattleRoleAugmentBinding(uniqueId, augmentId, pos));
+            }
         }
 
         return info;

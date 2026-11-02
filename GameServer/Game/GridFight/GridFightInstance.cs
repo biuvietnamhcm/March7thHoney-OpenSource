@@ -18,6 +18,19 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         public List<uint> RemovedUniqueIds { get; } = new();
         public uint KeptUniqueId { get; set; }
         public uint NewStar { get; set; }
+        public uint RoleId { get; set; }
+        /// <summary>
+        /// 合成参与角色在合成前的 pos，供客户端升星特效定位。
+        /// </summary>
+        public Dictionary<uint, uint> ParticipantPosByUniqueId { get; } = new();
+        /// <summary>
+        /// 合成前各参与角色的快照（含旧星级），供升星动画 sync 使用。
+        /// </summary>
+        public Dictionary<uint, GridGameRoleInfo> PreMergeRoleSnapshots { get; } = new();
+        /// <summary>
+        /// 本次合成刚完成时的保留卡快照，避免连续合成后 finalize 读到已消耗状态。
+        /// </summary>
+        public GridGameRoleInfo? FinalKeeperRoleInfo { get; set; }
         public bool Merged => RemovedUniqueIds.Count > 0 && KeptUniqueId > 0;
     }
     public PlayerInstance Player { get; } = player;
@@ -33,7 +46,7 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
     public uint BattleMaxHp { get; } = 10939;
     public uint Level { get; } = 1;
     public uint SectionId { get; set; } = 1;
-    public uint NDOCIKPLKIF { get; } = 1801;
+    public uint NDOCIKPLKIF => ResolveCombatEliteGroup();
     public uint CurrentChapterId { get; set; } = 1;
     public uint CurrentBranchId { get; set; } = 1;
     public uint RouteId { get; set; } = 1200;
@@ -54,11 +67,22 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
     public Dictionary<uint, uint> RoleStarByUniqueId { get; } = new();
     public Dictionary<uint, List<uint>> EquipUniqueIdsByRoleUniqueId { get; } = new();
 
+    /// <summary>角色绑定的 augment ID（key 为角色 uniqueId）。</summary>
+    public Dictionary<uint, List<uint>> RoleAugmentIdsByUniqueId { get; } = new();
+
+    /// <summary>最近一次 special_goods 购买绑定的核心角色 uniqueId。</summary>
+    public uint LastSpecialGoodsTargetUniqueId { get; set; }
     
     public uint ShopRefreshLeft { get; set; } = 2;
     public uint ShopRollCounter { get; set; }
     public List<GridFightShopGoodsInfo> ShopGoods { get; } = new();
     public List<uint> ShopRolePool { get; } = new();
+
+    /// <summary>最近一次成功购买的商店槽位索引，用于幂等重试。</summary>
+    public int LastBoughtShopIndex { get; set; } = -1;
+
+    /// <summary>最近一次成功购买生成的角色 uniqueId。</summary>
+    public uint LastBoughtUniqueId { get; set; }
 
     
     public List<uint> StageCandidates { get; } = new() { 35030205, 35030405, 35030208, 350202, 35030606 };
@@ -75,6 +99,12 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
     public List<uint> CurrentPortalBuffOffer { get; private set; } = new();
     
     public List<uint> ActiveAugmentIds { get; } = new();
+
+    /// <summary>本局是否已触发三星昔涟出战专属免费商店。</summary>
+    public bool CyreneSpecialShopTriggered { get; set; }
+
+    /// <summary>已激活「头号玩家」GM 控制台的角色 uniqueId（15061/15062/15063）。</summary>
+    public HashSet<uint> HeadPlayerActivatedUniqueIds { get; } = new();
     
     public uint LastEncounterQuality { get; set; }
     public uint LastEncounterAppliedSection { get; set; }
@@ -104,7 +134,7 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
     private static readonly uint[] FallbackPortalBuffPool =
     {
         101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
-        116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 129, 134, 135, 138,
+        116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 129, 132, 134, 135, 138,
         147, 1001, 1002, 1003, 1004, 1005, 1007, 1008, 1010, 1014, 1016,
         1101, 1102, 1104, 1106, 1107, 1108, 1112, 1113, 1114, 1115, 1116, 1118
     };
@@ -136,11 +166,25 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         return CurrentPortalBuffOffer;
     }
 
+    /// <summary>
+    /// 获取当前 portal 三选一列表；优先沿用 pending 下发给客户端的选项，避免重掷导致校验失败。
+    /// </summary>
     public List<uint> EnsurePortalBuffOffer()
     {
+        if (CurrentPortalBuffOffer.Count == 0
+            && PendingAction?.PortalBuffAction?.GridFightPortalBuffList is { Count: > 0 } pendingOffer)
+        {
+            CurrentPortalBuffOffer = pendingOffer.ToList();
+        }
         if (CurrentPortalBuffOffer.Count == 0) RollPortalBuffs();
         return CurrentPortalBuffOffer;
     }
+
+    /// <summary>
+    /// 判断 portal buff 是否尚未完成选择（未激活 buff 且未同步初始备战角色）。
+    /// </summary>
+    public bool IsPortalBuffSelectionPending() =>
+        !InitialBenchRolesSynced && ActivePortalBuffIds.Count == 0;
 
     public void ClearPortalBuffOffer() => CurrentPortalBuffOffer = new List<uint>();
 
@@ -356,6 +400,24 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         return added;
     }
 
+    /// <summary>
+    /// 将 3503**** 成品装备（Craftable）升级为 3504****（Radiant）；保留穿戴角色与 source。
+    /// </summary>
+    public GridFightEquipmentInfo? UpgradeCraftableEquipment(uint equipUniqueId)
+    {
+        var old = FindEquipment(equipUniqueId);
+        if (old == null) return null;
+        if (!GameData.GridFightEquipUpgradeData.TryGetValue(old.GridFightEquipmentId, out var upgradeExcel))
+            return null;
+        if (!GameData.GridFightEquipmentData.TryGetValue(old.GridFightEquipmentId, out var oldExcel)
+            || oldExcel.EquipCategory != GridFightEquipCategoryEnum.Craftable)
+            return null;
+        if (!GameData.GridFightEquipmentData.ContainsKey(upgradeExcel.UpgradeID))
+            return null;
+
+        return RollEquipment(equipUniqueId, upgradeExcel.UpgradeID, old.Source);
+    }
+
     public bool TryConsumeConsumable(uint itemId, int amount = 1)
     {
         for (var i = 0; i < amount; i++)
@@ -404,18 +466,304 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         PendingAction = null;
     }
 
-    public void ApplyPositionList(IEnumerable<GridFightPosInfo> posInfoList)
+    /// <summary>
+    /// 校验并应用走位（含换位）；出战席（pos 1-13）禁止同名角色并存。
+    /// </summary>
+    /// <returns>实际发生位置变化的角色列表，供 sync 使用。</returns>
+    public (Retcode retcode, List<GridFightPosInfo> affected) TryValidateAndApplyPositionList(
+        IEnumerable<GridFightPosInfo> posInfoList)
     {
         EnsureDefaultRoles();
-        foreach (var posInfo in posInfoList)
+        var updates = posInfoList.ToList();
+        if (updates.Any(p => p.Pos < BattlefieldPosMin || p.Pos > BenchPosMax))
+            return (Retcode.RetGridFightPosNotValid, []);
+        if (updates.Count == 0)
+            return (Retcode.RetSucc, []);
+
+        var projected = new Dictionary<uint, uint>(UniqueIdByPos);
+        foreach (var posInfo in updates)
         {
-            if (posInfo.Pos == 0) continue;
-            foreach (var stale in UniqueIdByPos
-                         .Where(kv => kv.Key != posInfo.Pos && kv.Value == posInfo.UniqueId)
-                         .Select(kv => kv.Key).ToList())
-                UniqueIdByPos.Remove(stale);
-            UniqueIdByPos[posInfo.Pos] = posInfo.UniqueId;
+            if (posInfo.UniqueId != 0 && !RoleByUniqueId.ContainsKey(posInfo.UniqueId))
+                return (Retcode.RetGridFightRoleNotExist, []);
+
+            ApplyProjectedMove(projected, posInfo.Pos, posInfo.UniqueId);
         }
+
+        var battlefieldRoleIds = projected
+            .Where(kv => kv.Key is >= 1 and <= 13 && kv.Value != 0)
+            .Select(kv => GridFightRoleLookup.ToAvatarId(RoleByUniqueId.GetValueOrDefault(kv.Value)))
+            .Where(id => id != 0)
+            .ToList();
+        if (battlefieldRoleIds.Count > GetCurrentMaxBattleRoleNum())
+            return (Retcode.RetGridFightRegionFull, []);
+        if (battlefieldRoleIds.Count != battlefieldRoleIds.Distinct().Count())
+            return (Retcode.RetGridFightSameRoleInBattle, []);
+
+        var affected = new List<GridFightPosInfo>();
+        foreach (var posInfo in updates)
+        {
+            if (posInfo.UniqueId == 0)
+            {
+                if (UniqueIdByPos.Remove(posInfo.Pos, out var removedUid) && removedUid != 0)
+                    affected.Add(new GridFightPosInfo { Pos = 0, UniqueId = removedUid });
+                continue;
+            }
+
+            ApplyActualMove(affected, posInfo.Pos, posInfo.UniqueId);
+        }
+
+        return (Retcode.RetSucc, affected);
+    }
+
+    /// <summary>
+    /// 在投影布局上模拟单次走位（含目标位互换）。
+    /// </summary>
+    private static void ApplyProjectedMove(Dictionary<uint, uint> layout, uint targetPos, uint movingUid)
+    {
+        if (movingUid == 0)
+        {
+            layout.Remove(targetPos);
+            return;
+        }
+
+        var sourcePos = layout.FirstOrDefault(kv => kv.Value == movingUid).Key;
+        var displacedUid = layout.GetValueOrDefault(targetPos);
+
+        if (sourcePos > 0 && sourcePos != targetPos)
+            layout.Remove(sourcePos);
+
+        if (displacedUid != 0 && displacedUid != movingUid)
+        {
+            if (sourcePos > 0)
+                layout[sourcePos] = displacedUid;
+            else
+                layout.Remove(targetPos);
+        }
+
+        layout[targetPos] = movingUid;
+    }
+
+    /// <summary>
+    /// 应用单次走位并记录所有受影响角色，便于客户端同步。
+    /// </summary>
+    private void ApplyActualMove(List<GridFightPosInfo> affected, uint targetPos, uint movingUid)
+    {
+        var sourcePos = UniqueIdByPos.FirstOrDefault(kv => kv.Value == movingUid).Key;
+        var displacedUid = UniqueIdByPos.GetValueOrDefault(targetPos);
+
+        if (sourcePos > 0 && sourcePos != targetPos)
+            UniqueIdByPos.Remove(sourcePos);
+
+        if (displacedUid != 0 && displacedUid != movingUid)
+        {
+            if (sourcePos > 0)
+            {
+                UniqueIdByPos[sourcePos] = displacedUid;
+                affected.Add(new GridFightPosInfo { Pos = sourcePos, UniqueId = displacedUid });
+            }
+            else if (TryAllocBenchPos(out var benchPos))
+            {
+                UniqueIdByPos[benchPos] = displacedUid;
+                affected.Add(new GridFightPosInfo { Pos = benchPos, UniqueId = displacedUid });
+            }
+        }
+
+        UniqueIdByPos[targetPos] = movingUid;
+        affected.Add(new GridFightPosInfo { Pos = targetPos, UniqueId = movingUid });
+    }
+
+    /// <summary>
+    /// 构建用于 sync 的角色快照。
+    /// </summary>
+    public GridGameRoleInfo BuildGridGameRoleInfo(uint uniqueId, uint pos = 0)
+    {
+        if (!RoleByUniqueId.TryGetValue(uniqueId, out var roleKey))
+            return new GridGameRoleInfo();
+
+        var syncRoleId = GridFightRoleLookup.ToSyncRoleId(roleKey);
+        if (pos == 0)
+            pos = UniqueIdByPos.FirstOrDefault(kv => kv.Value == uniqueId).Key;
+
+        var roleInfo = new GridGameRoleInfo
+        {
+            Id = syncRoleId,
+            Pos = pos,
+            UniqueId = uniqueId,
+            RoleStar = RoleStarByUniqueId.GetValueOrDefault(uniqueId, 1u)
+        };
+        if (GridFightRoleLookup.TryFind(roleKey, out var roleExcel)
+            && roleExcel.RoleSavedValueList.Count > 0)
+            roleInfo.GridFightValueInitComponent[roleExcel.RoleSavedValueList[0]] = 0;
+        return roleInfo;
+    }
+
+    /// <summary>
+    /// 解析角色当前站位；未找到时返回 0。
+    /// </summary>
+    public uint ResolveRolePos(uint uniqueId) =>
+        UniqueIdByPos.FirstOrDefault(kv => kv.Value == uniqueId).Key;
+
+    /// <summary>
+    /// 绑定 augment 至指定角色（出战席/备战席均可；不校验角色类型）。
+    /// </summary>
+    public void BindRoleAugment(uint uniqueId, uint augmentId)
+    {
+        if (!GameData.GridFightAugmentData.ContainsKey(augmentId))
+            return;
+
+        if (!RoleAugmentIdsByUniqueId.TryGetValue(uniqueId, out var augments))
+        {
+            augments = [];
+            RoleAugmentIdsByUniqueId[uniqueId] = augments;
+        }
+
+        if (!augments.Contains(augmentId))
+            augments.Add(augmentId);
+    }
+
+    /// <summary>
+    /// 构建备战段用的角色 augment 绑定条目（pos + uniqueId + augmentId）。
+    /// </summary>
+    public CKCKIDHMMEG BuildPrepRoleAugmentBinding(uint uniqueId, uint augmentId, uint pos = 0)
+    {
+        if (pos == 0)
+            pos = ResolveRolePos(uniqueId);
+
+        return new CKCKIDHMMEG
+        {
+            Pos = pos,
+            UniqueId = uniqueId,
+            JCMFPHMFAON = augmentId
+        };
+    }
+
+    /// <summary>
+    /// 构建战斗段用的角色 augment 绑定条目（pos + uniqueId + augmentId）。
+    /// </summary>
+    public CCGEOHGFAFD BuildBattleRoleAugmentBinding(uint uniqueId, uint augmentId, uint pos = 0)
+    {
+        if (pos == 0)
+            pos = ResolveRolePos(uniqueId);
+
+        return new CCGEOHGFAFD
+        {
+            Pos = pos,
+            UniqueId = uniqueId,
+            JCMFPHMFAON = augmentId
+        };
+    }
+
+    /// <summary>
+    /// 获取角色绑定的首个 augment ID；无绑定时返回 0。
+    /// </summary>
+    public uint GetPrimaryRoleAugmentId(uint uniqueId) =>
+        RoleAugmentIdsByUniqueId.TryGetValue(uniqueId, out var augments) && augments.Count > 0
+            ? augments[0]
+            : 0u;
+
+    /// <summary>
+    /// 填充队伍段 MMAJCLACOBN（角色 augment 绑定全量 sync）。
+    /// </summary>
+    public void PopulatePrepRoleAugmentBindings(GridFightGameTeamInfo team)
+    {
+        foreach (var (pos, uniqueId) in UniqueIdByPos.OrderBy(kv => kv.Key))
+        {
+            if (uniqueId == 0 || !RoleAugmentIdsByUniqueId.TryGetValue(uniqueId, out var augments))
+                continue;
+
+            foreach (var augmentId in augments)
+                team.MMAJCLACOBN.Add(BuildPrepRoleAugmentBinding(uniqueId, augmentId, pos));
+        }
+    }
+
+    /// <summary>
+    /// 向 sync 段追加 BAODHPCOJLH（单角色 augment 绑定增量同步）。
+    /// </summary>
+    public static void AppendRoleAugmentBindingSync(
+        GridFightSyncResultData sync,
+        GridFightInstance inst,
+        uint uniqueId,
+        uint augmentId)
+    {
+        sync.UpdateDynamicList.Add(new GridFightSyncData
+        {
+            BAODHPCOJLH = inst.BuildPrepRoleAugmentBinding(uniqueId, augmentId)
+        });
+    }
+
+    /// <summary>
+    /// 枚举当前棋盘与备战席上的全部有效角色（pos 1-22，不含临时溢出位）。
+    /// </summary>
+    public IEnumerable<(uint UniqueId, uint Pos)> EnumerateBoardRoles()
+    {
+        foreach (var (pos, uniqueId) in UniqueIdByPos.OrderBy(kv => kv.Key))
+        {
+            if (pos is < 1 or > BenchPosMax || uniqueId == 0) continue;
+            if (!RoleByUniqueId.ContainsKey(uniqueId)) continue;
+            yield return (uniqueId, pos);
+        }
+    }
+
+    /// <summary>
+    /// 扫描全场角色并执行所有可触发的三连升星；每次只合成一组，直到无可合成组合。
+    /// </summary>
+    public List<RoleMergeResult> TryAutoMergeAllRoles()
+    {
+        var results = new List<RoleMergeResult>();
+        while (true)
+        {
+            var mergedAny = false;
+            var roleIds = RoleByUniqueId.Values
+                .Select(GridFightRoleLookup.ToRoleId)
+                .Where(id => id != 0)
+                .Distinct()
+                .ToList();
+
+            foreach (var roleId in roleIds)
+            {
+                while (TryFindMergeableStarter(roleId, out var starter))
+                {
+                    var merge = TryAutoMergeRole(roleId, starter);
+                    if (!merge.Merged) break;
+                    results.Add(merge);
+                    mergedAny = true;
+                }
+            }
+
+            if (!mergedAny) break;
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// 查找指定角色是否存在可三连合成的星级组，并返回其中一张参与卡的 uniqueId。
+    /// </summary>
+    private bool TryFindMergeableStarter(uint roleId, out uint starterUid)
+    {
+        starterUid = 0;
+        roleId = GridFightRoleLookup.ToRoleId(roleId);
+        if (roleId == 0) return false;
+
+        var mergeableGroup = RoleByUniqueId
+            .Where(kv => GridFightRoleLookup.ToRoleId(kv.Value) == roleId)
+            .GroupBy(kv => RoleStarByUniqueId.GetValueOrDefault(kv.Key, 1u))
+            .FirstOrDefault(g => g.Count() >= 3);
+        if (mergeableGroup == null) return false;
+
+        starterUid = mergeableGroup.First().Key;
+        return starterUid != 0;
+    }
+
+    /// <summary>
+    /// 对指定角色尝试三连升星（备战席与出战席均参与合成）。
+    /// </summary>
+    public RoleMergeResult TryAutoMergeRolesForRole(uint roleId)
+    {
+        var syncRoleId = GridFightRoleLookup.ToRoleId(roleId);
+        var starter = RoleByUniqueId
+            .FirstOrDefault(kv => GridFightRoleLookup.ToRoleId(kv.Value) == syncRoleId).Key;
+        return starter == 0 ? new RoleMergeResult() : TryAutoMergeRole(syncRoleId, starter);
     }
 
     public List<(uint RoleId, uint Pos)> ResolveForegroundRoles()
@@ -453,8 +801,7 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         return ResolveBackgroundRoles().Select(t => RoleIdToAvatarId(t.RoleId)).Where(id => id != 0).ToList();
     }
 
-    private static int RoleIdToAvatarId(uint roleId) =>
-        GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var e) ? (int)e.AvatarID : (int)roleId;
+    private static int RoleIdToAvatarId(uint roleKey) => (int)GridFightRoleLookup.ToAvatarId(roleKey);
 
     public List<IENNMHMOONM> CheckTrait()
     {
@@ -465,8 +812,9 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         foreach (var kv in UniqueIdByPos.Where(kv => kv.Key is > 0 and <= 13))
         {
             var uniqueId = kv.Value;
-            if (uniqueId == 0 || !RoleByUniqueId.TryGetValue(uniqueId, out var roleId)) continue;
-            if (!GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var role)) continue;
+            if (uniqueId == 0 || !RoleByUniqueId.TryGetValue(uniqueId, out var roleKey)) continue;
+            var role = GridFightRoleLookup.Find(roleKey);
+            if (role == null) continue;
             var roleTraits = new HashSet<uint>(role.TraitList);
             if (EquipUniqueIdsByRoleUniqueId.TryGetValue(uniqueId, out var dressed))
             {
@@ -569,6 +917,8 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
     {
         ShopGoods.Clear();
         ShopRollCounter++;
+        LastBoughtShopIndex = -1;
+        LastBoughtUniqueId = 0;
 
         var rng = Random.Shared;
         var rarityWeights = GetShopRarityWeights();
@@ -584,7 +934,7 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
             if (pool.Count == 0) break;
 
             var roleId = pool[rng.Next(pool.Count)];
-            var price = GetShopGoodsPrice(rarity, 1);
+            var price = GetShopGoodsPrice(GridFightRoleLookup.Find(roleId)?.Rarity ?? rarity, 1);
             ShopGoods.Add(new GridFightShopGoodsInfo
             {
                 ShopGoodsPrice = price,
@@ -593,15 +943,77 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         }
     }
 
-    private List<uint> GetShopRarityWeights()
+    private List<uint> GetShopRarityWeights() => GetShopRarityWeightsForLevel(PlayerLevel);
+
+    /// <summary>
+    /// 读取指定玩家等级对应的商店费用权重（与 RollShopRarity 使用同一配置）。
+    /// </summary>
+    public static List<uint> GetShopRarityWeightsForLevel(uint playerLevel)
     {
-        if (GameData.GridFightPlayerLevelData.TryGetValue(PlayerLevel, out var conf)
+        if (GameData.GridFightPlayerLevelData.TryGetValue(playerLevel, out var conf)
             && conf.RarityWeights.Count >= 5)
             return conf.RarityWeights;
         return [100, 0, 0, 0, 0];
     }
 
+    /// <summary>
+    /// 构建商店 UI 费用概率展示数据（LDEDGOOKHFL / FLICPMGFKOK）。
+    /// </summary>
+    public FJPONJFLOOH BuildShopRarityDisplayInfo() =>
+        BuildShopRarityDisplayInfoForLevel(PlayerLevel);
+
+    /// <summary>
+    /// 按玩家等级构建商店各费用档位出现概率，供 sync 与 ToProto 使用。
+    /// </summary>
+    public static FJPONJFLOOH BuildShopRarityDisplayInfoForLevel(uint playerLevel)
+    {
+        var weights = GetShopRarityWeightsForLevel(playerLevel);
+        var info = new FJPONJFLOOH();
+        for (var i = 0; i < 5; i++)
+        {
+            info.EDJPMNLLGGB.Add(new MJJEHCBNOKI
+            {
+                MMKNFIFOPPA = (uint)(i + 1),
+                FLICPMGFKOK = i < weights.Count ? weights[i] : 0u
+            });
+        }
+        return info;
+    }
+
     private Dictionary<uint, List<uint>> BuildShopRolePoolByRarity()
+    {
+        var excluded = GetShopExcludedRoleIds();
+        return BuildShopRolePoolByRarityCore(excluded);
+    }
+
+    /// <summary>
+    /// 收集出战席（pos 1-13）与备战席（pos 14+）上 3 星及以上角色的内部 roleId，供商店刷新时从候选池排除。
+    /// </summary>
+    private HashSet<uint> GetShopExcludedRoleIds()
+    {
+        var excluded = new HashSet<uint>();
+        foreach (var (pos, uniqueId) in UniqueIdByPos)
+        {
+            if (uniqueId == 0) continue;
+            if (!IsBattlefieldOrBenchPos(pos)) continue;
+            if (RoleStarByUniqueId.GetValueOrDefault(uniqueId, 1u) < 3) continue;
+            if (!RoleByUniqueId.TryGetValue(uniqueId, out var roleKey)) continue;
+            excluded.Add(GridFightRoleLookup.ToRoleId(roleKey));
+        }
+        return excluded;
+    }
+
+    /// <summary>
+    /// 判断 pos 是否属于出战席或备战席（不含临时溢出落点）。
+    /// </summary>
+    private static bool IsBattlefieldOrBenchPos(uint pos) =>
+        pos is >= BattlefieldPosMin and <= BattlefieldPosMax
+        || pos is >= BenchPosMin and <= BenchPosMax;
+
+    /// <summary>
+    /// 按稀有度构建商店角色候选池；excludedRoleIds 非空时排除对应角色。
+    /// </summary>
+    private Dictionary<uint, List<uint>> BuildShopRolePoolByRarityCore(IReadOnlySet<uint>? excludedRoleIds)
     {
         var dict = new Dictionary<uint, List<uint>>();
         foreach (var role in GameData.GridFightRoleBasicInfoData.Values)
@@ -609,6 +1021,7 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
             if (!role.IsInPool) continue;
             if (role.SeasonID != 0 && role.SeasonID != Season) continue;
             if (role.AvatarID < 1000 || role.AvatarID >= 2000) continue;
+            if (excludedRoleIds != null && excludedRoleIds.Contains(role.ID)) continue;
             if (!dict.TryGetValue(role.Rarity, out var list))
                 dict[role.Rarity] = list = [];
             list.Add(role.ID);
@@ -650,78 +1063,235 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         };
     }
 
-    public (bool ok, uint addedUniqueId, uint roleId, uint pos) TryBuyGoods(int shopIndex)
+    public (bool ok, uint addedUniqueId, uint roleId, uint pos, List<GridFightPosInfo> benchMoved, bool duplicateRetry, uint purchasedAugmentId, Retcode retcode) TryBuyGoods(int shopIndex)
     {
-        if (shopIndex < 0 || shopIndex >= ShopGoods.Count) return (false, 0, 0, 0);
+        if (shopIndex < 0 || shopIndex >= ShopGoods.Count)
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightParamNotMatch);
         var goods = ShopGoods[shopIndex];
-        if (goods.RoleGoodsInfo == null || goods.IsSoldOut) return (false, 0, 0, 0);
-        var price = goods.ShopGoodsPrice;
-        if (Gold < price) Gold = price; 
+        if (goods.SpecialGoodsInfo != null)
+            return TryBuySpecialGoods(shopIndex, goods);
+
+        if (goods.RoleGoodsInfo == null)
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightParamNotMatch);
+        if (goods.IsSoldOut)
+        {
+            if (LastBoughtShopIndex == shopIndex)
+            {
+                if (LastBoughtUniqueId != 0 && RoleByUniqueId.ContainsKey(LastBoughtUniqueId))
+                {
+                    var uid = LastBoughtUniqueId;
+                    var existingPos = UniqueIdByPos.FirstOrDefault(kv => kv.Value == uid).Key;
+                    var existingRoleId = GridFightRoleLookup.ToSyncRoleId(RoleByUniqueId[uid]);
+                    return (true, uid, existingRoleId, existingPos, [], true, 0, Retcode.RetSucc);
+                }
+
+                var soldRoleId = goods.RoleGoodsInfo.RoleId;
+                var keptUid = RoleByUniqueId
+                    .FirstOrDefault(kv => GridFightRoleLookup.ToRoleId(kv.Value) == soldRoleId).Key;
+                if (keptUid != 0)
+                {
+                    var keptPos = UniqueIdByPos.FirstOrDefault(kv => kv.Value == keptUid).Key;
+                    return (true, keptUid, soldRoleId, keptPos, [], true, 0, Retcode.RetSucc);
+                }
+
+                return (true, 0, 0, 0, [], true, 0, Retcode.RetSucc);
+            }
+
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightGoodsSold);
+        }
+
+        var star = goods.RoleGoodsInfo.RoleStar > 0 ? goods.RoleGoodsInfo.RoleStar : 1u;
+        var roleId = goods.RoleGoodsInfo.RoleId;
+        var price = GetShopGoodsPrice(
+            GridFightRoleLookup.TryFind(roleId, out var roleExcel) ? roleExcel.Rarity : 1u,
+            star);
+        if (Gold < price)
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightCoinNotEnough);
+
+        if (!TryAcquirePurchasePos(roleId, star, out var pos))
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightNoEmptyPos);
+
         Gold -= price;
         goods.IsSoldOut = true;
-        var roleId = goods.RoleGoodsInfo.RoleId;
         var uniqueId = AllocRoleUniqueId();
         RoleByUniqueId[uniqueId] = roleId;
-        RoleStarByUniqueId[uniqueId] = 1;
-        
-        uint pos = 0;
-        foreach (var candidate in new uint[] { 14, 15, 16, 17, 18, 6, 7, 8, 9, 10, 11, 12, 13 })
-        {
-            if (!UniqueIdByPos.ContainsKey(candidate))
-            {
-                pos = candidate;
-                break;
-            }
-        }
-        if (pos > 0) UniqueIdByPos[pos] = uniqueId;
-        return (true, uniqueId, roleId, pos);
+        RoleStarByUniqueId[uniqueId] = star;
+        UniqueIdByPos[pos] = uniqueId;
+        LastBoughtShopIndex = shopIndex;
+        LastBoughtUniqueId = uniqueId;
+        return (true, uniqueId, roleId, pos, [], false, 0, Retcode.RetSucc);
     }
 
+    /// <summary>
+    /// 投影仪复制角色：生成与目标同角色的 1 星副本，落点规则与购买一致（备战席优先，可升星溢出）。
+    /// </summary>
+    /// <param name="sourceUniqueId">被复制角色的 uniqueId。</param>
+    /// <param name="maxRarity">允许复制的最高费用（350105=3，350106=5）。</param>
+    public (bool ok, uint newUniqueId, uint targetPos, uint sourcePos, Retcode retcode) TryCopyRole(
+        uint sourceUniqueId,
+        uint maxRarity)
+    {
+        if (!RoleByUniqueId.TryGetValue(sourceUniqueId, out var roleKey))
+            return (false, 0, 0, 0, Retcode.RetGridFightParamNotMatch);
+
+        if (!GridFightRoleLookup.TryFind(roleKey, out var roleExcel))
+            return (false, 0, 0, 0, Retcode.RetGridFightParamNotMatch);
+
+        if (maxRarity > 0 && roleExcel.Rarity > maxRarity)
+            return (false, 0, 0, 0, Retcode.RetGridFightParamNotMatch);
+
+        const uint copyStar = 1u;
+        var sourcePos = ResolveRolePos(sourceUniqueId);
+        if (sourcePos == 0)
+            return (false, 0, 0, 0, Retcode.RetGridFightParamNotMatch);
+
+        if (!TryAcquirePurchasePos(roleKey, copyStar, out var targetPos))
+            return (false, 0, 0, sourcePos, Retcode.RetGridFightNoEmptyPos);
+
+        var newUniqueId = AllocRoleUniqueId();
+        RoleByUniqueId[newUniqueId] = roleKey;
+        RoleStarByUniqueId[newUniqueId] = copyStar;
+        UniqueIdByPos[targetPos] = newUniqueId;
+
+        return (true, newUniqueId, targetPos, sourcePos, Retcode.RetSucc);
+    }
+
+    /// <summary>
+    /// 购买昔涟专属诗篇等特殊商品：仅绑定至出战席三星昔涟。
+    /// </summary>
+    private (bool ok, uint addedUniqueId, uint roleId, uint pos, List<GridFightPosInfo> benchMoved, bool duplicateRetry, uint purchasedAugmentId, Retcode retcode) TryBuySpecialGoods(
+        int shopIndex,
+        GridFightShopGoodsInfo goods)
+    {
+        var augmentId = goods.SpecialGoodsInfo!.SpecialGoodsId;
+        if (augmentId == 0)
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightParamNotMatch);
+        if (!GameData.GridFightAugmentData.ContainsKey(augmentId))
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightParamNotMatch);
+
+        if (!GridFightCyreneSpecialShopService.TryGetThreeStarCyreneBattlefieldRole(this, out var targetUid, out _))
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightParamNotMatch);
+
+        if (goods.IsSoldOut)
+        {
+            if (LastBoughtShopIndex == shopIndex
+                && RoleAugmentIdsByUniqueId.TryGetValue(targetUid, out var owned)
+                && owned.Contains(augmentId))
+            {
+                LastSpecialGoodsTargetUniqueId = targetUid;
+                return (true, 0, 0, 0, [], true, augmentId, Retcode.RetSucc);
+            }
+
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightGoodsSold);
+        }
+
+        if (RoleAugmentIdsByUniqueId.TryGetValue(targetUid, out var existing) && existing.Contains(augmentId))
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightParamNotMatch);
+
+        var price = goods.ShopGoodsPrice;
+        if (Gold < price)
+            return (false, 0, 0, 0, [], false, 0, Retcode.RetGridFightCoinNotEnough);
+
+        Gold -= price;
+        goods.IsSoldOut = true;
+        LastBoughtShopIndex = shopIndex;
+        LastBoughtUniqueId = 0;
+        LastSpecialGoodsTargetUniqueId = targetUid;
+
+        BindRoleAugment(targetUid, augmentId);
+
+        return (true, 0, 0, 0, [], false, augmentId, Retcode.RetSucc);
+    }
+
+    /// <summary>
+    /// 对指定角色尝试一次三连升星（备战席与出战席均参与合成）。
+    /// </summary>
     public RoleMergeResult TryAutoMergeRole(uint roleId, uint roleUniqueId)
     {
         var result = new RoleMergeResult();
+        roleId = GridFightRoleLookup.ToRoleId(roleId);
         if (roleId == 0 || roleUniqueId == 0) return result;
+        if (!TryFindMergeableGroup(roleId, roleUniqueId, out var starTier, out var sameTier))
+            return result;
 
-        var keepUniqueId = roleUniqueId;
-        var currentStar = RoleStarByUniqueId.GetValueOrDefault(keepUniqueId, 1u);
-        while (true)
+        var nextStar = starTier + 1;
+        if (!CanRoleUpgradeToStar(roleId, nextStar))
+            return result;
+
+        var keepUniqueId = sameTier.Contains(roleUniqueId) ? roleUniqueId : sameTier[0];
+        var consume = sameTier.Where(x => x != keepUniqueId).Take(2).ToList();
+        if (consume.Count < 2) return result;
+
+        result.RoleId = roleId;
+        foreach (var uid in sameTier)
         {
-            var nextStar = currentStar + 1;
-            if (!GameData.GridFightRoleStarData.ContainsKey(roleId << 4 | nextStar))
-                break;
-
-            var sameTier = RoleByUniqueId
-                .Where(kv => kv.Value == roleId && RoleStarByUniqueId.GetValueOrDefault(kv.Key, 1u) == currentStar)
-                .Select(kv => kv.Key)
-                .Distinct()
-                .ToList();
-            if (sameTier.Count < 3) break;
-
-            if (!sameTier.Contains(keepUniqueId))
-                keepUniqueId = sameTier[0];
-
-            var consume = sameTier.Where(x => x != keepUniqueId).Take(2).ToList();
-            if (consume.Count < 2) break;
-
-            foreach (var uid in consume)
-            {
-                RoleByUniqueId.Remove(uid);
-                RoleStarByUniqueId.Remove(uid);
-                foreach (var pos in UniqueIdByPos.Where(kv => kv.Value == uid).Select(kv => kv.Key).ToList())
-                    UniqueIdByPos.Remove(pos);
-                result.RemovedUniqueIds.Add(uid);
-            }
-
-            currentStar = nextStar;
-            RoleStarByUniqueId[keepUniqueId] = currentStar;
+            result.PreMergeRoleSnapshots[uid] = BuildGridGameRoleInfo(uid);
+            var participantPos = UniqueIdByPos.FirstOrDefault(kv => kv.Value == uid).Key;
+            if (participantPos > 0)
+                result.ParticipantPosByUniqueId[uid] = participantPos;
         }
 
-        if (result.RemovedUniqueIds.Count > 0)
+        foreach (var uid in consume)
         {
-            result.KeptUniqueId = keepUniqueId;
-            result.NewStar = RoleStarByUniqueId.GetValueOrDefault(keepUniqueId, 1u);
+            RoleByUniqueId.Remove(uid);
+            RoleStarByUniqueId.Remove(uid);
+            foreach (var pos in UniqueIdByPos.Where(kv => kv.Value == uid).Select(kv => kv.Key).ToList())
+                UniqueIdByPos.Remove(pos);
+            result.RemovedUniqueIds.Add(uid);
         }
+
+        RoleStarByUniqueId[keepUniqueId] = nextStar;
+        result.KeptUniqueId = keepUniqueId;
+        result.NewStar = nextStar;
+        result.FinalKeeperRoleInfo = BuildGridGameRoleInfo(keepUniqueId);
         return result;
+    }
+
+    /// <summary>
+    /// 查找指定角色当前可合成的星级组；优先使用 hintUid 所在星级。
+    /// </summary>
+    private bool TryFindMergeableGroup(uint roleId, uint hintUid, out uint starTier, out List<uint> sameTier)
+    {
+        starTier = 0;
+        sameTier = [];
+
+        var groups = RoleByUniqueId
+            .Where(kv => GridFightRoleLookup.ToRoleId(kv.Value) == roleId)
+            .GroupBy(kv => RoleStarByUniqueId.GetValueOrDefault(kv.Key, 1u))
+            .Where(g => g.Count() >= 3)
+            .OrderBy(g => g.Key)
+            .ToList();
+        if (groups.Count == 0) return false;
+
+        if (hintUid != 0
+            && RoleByUniqueId.ContainsKey(hintUid)
+            && GridFightRoleLookup.ToRoleId(RoleByUniqueId[hintUid]) == roleId)
+        {
+            var hintStar = RoleStarByUniqueId.GetValueOrDefault(hintUid, 1u);
+            var hintGroup = groups.FirstOrDefault(g => g.Key == hintStar);
+            if (hintGroup != null)
+            {
+                starTier = hintStar;
+                sameTier = hintGroup.Select(kv => kv.Key).Distinct().ToList();
+                return sameTier.Count >= 3;
+            }
+        }
+
+        var first = groups[0];
+        starTier = first.Key;
+        sameTier = first.Select(kv => kv.Key).Distinct().ToList();
+        return sameTier.Count >= 3;
+    }
+
+    /// <summary>
+    /// 判断角色能否升到指定星级；配置缺失时允许升至 3 星以匹配客户端默认规则。
+    /// </summary>
+    private static bool CanRoleUpgradeToStar(uint roleKey, uint nextStar)
+    {
+        var internalId = GridFightRoleLookup.ToRoleId(roleKey);
+        if (GameData.GridFightRoleStarData.ContainsKey(internalId << 4 | nextStar))
+            return true;
+        return nextStar <= 3;
     }
 
     public (bool ok, uint refund) TryRecycleRole(uint uniqueId)
@@ -737,9 +1307,9 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         return (true, refund);
     }
 
-    private static uint GetRoleSellPrice(uint roleId, uint roleStar)
+    private static uint GetRoleSellPrice(uint roleKey, uint roleStar)
     {
-        if (!GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var role))
+        if (!GridFightRoleLookup.TryFind(roleKey, out var role))
             return 1;
         if (!GameData.GridFightShopPriceData.TryGetValue(role.Rarity, out var priceConf))
             return 1;
@@ -776,11 +1346,191 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         return 4;
     }
 
+    /// <summary>备战席固定 9 格（pos 14-22）。</summary>
+    public const uint BenchSlotCount = 9;
+    public const uint BenchPosMin = 14;
+    public const uint BenchPosMax = BenchPosMin + BenchSlotCount - 1;
+    public const uint BattlefieldPosMin = 1;
+    public const uint BattlefieldPosMax = 13;
+
+    /// <summary>出战席前台固定格数（pos 1-4）。</summary>
+    public const uint BattlefieldForegroundMax = 4;
+
+    /// <summary>
+    /// 统计指定角色在某星级的现有数量。
+    /// </summary>
+    public uint CountRolesAtStar(uint roleKey, uint star)
+    {
+        var roleId = GridFightRoleLookup.ToRoleId(roleKey);
+        if (roleId == 0) return 0;
+        return (uint)RoleByUniqueId.Count(kv =>
+            GridFightRoleLookup.ToRoleId(kv.Value) == roleId
+            && RoleStarByUniqueId.GetValueOrDefault(kv.Key, 1u) == star);
+    }
+
+    /// <summary>
+    /// 购买一张同角色同星级卡是否会触发三连升星（已有至少 2 张）。
+    /// </summary>
+    public bool WouldPurchaseTriggerMerge(uint roleKey, uint star) =>
+        star < uint.MaxValue && CanRoleUpgradeToStar(roleKey, star + 1) && CountRolesAtStar(roleKey, star) >= 2;
+
+    /// <summary>
+    /// 分配购买落点；备战席满员时若购买可触发升星则允许临时溢出落点。
+    /// </summary>
+    public bool TryAcquirePurchasePos(uint roleKey, uint star, out uint pos)
+    {
+        if (TryAllocBenchPos(out pos))
+            return true;
+        if (!WouldPurchaseTriggerMerge(roleKey, star))
+            return false;
+
+        pos = BenchPosMax + 1;
+        return true;
+    }
+
+    /// <summary>
+    /// 升星后回收临时溢出落点（pos &gt; 22），不压缩已有备战席布局。
+    /// </summary>
+    public List<GridFightPosInfo> FinalizeBenchAfterMerge()
+    {
+        var moved = new List<GridFightPosInfo>();
+        var overflowEntries = UniqueIdByPos
+            .Where(kv => kv.Key > BenchPosMax && kv.Value != 0)
+            .ToList();
+        foreach (var (overflowPos, uid) in overflowEntries)
+        {
+            UniqueIdByPos.Remove(overflowPos);
+            if (!RoleByUniqueId.ContainsKey(uid)) continue;
+            if (!TryAllocBenchPos(out var benchPos)) continue;
+            UniqueIdByPos[benchPos] = uid;
+            moved.Add(new GridFightPosInfo { Pos = benchPos, UniqueId = uid });
+        }
+
+        return moved;
+    }
+
+    /// <summary>
+    /// 将备战席角色压缩到连续低位 pos，返回位置发生变化的角色。
+    /// </summary>
+    public List<GridFightPosInfo> CompactBenchSlots()
+    {
+        var moved = new List<GridFightPosInfo>();
+        var benchRoles = UniqueIdByPos
+            .Where(kv => kv.Key is >= BenchPosMin and <= BenchPosMax && kv.Value != 0)
+            .OrderBy(kv => kv.Key)
+            .ToList();
+
+        foreach (var (pos, _) in benchRoles)
+            UniqueIdByPos.Remove(pos);
+
+        for (var i = 0; i < benchRoles.Count; i++)
+        {
+            var newPos = BenchPosMin + (uint)i;
+            var uid = benchRoles[i].Value;
+            var oldPos = benchRoles[i].Key;
+            UniqueIdByPos[newPos] = uid;
+            if (newPos != oldPos)
+                moved.Add(new GridFightPosInfo { Pos = newPos, UniqueId = uid });
+        }
+
+        return moved;
+    }
+
+    /// <summary>出战总人数硬上限（含特殊效果加成后）。</summary>
+    public const uint MaxBattleDeployTotal = 13;
+
+    /// <summary>财富宝钻装备 ID；持有则上阵人数 +1。</summary>
+    public const uint WealthGemEquipmentId = 350701;
+
+    /// <summary>是否已向客户端同步过开局备战席角色。</summary>
+    public bool InitialBenchRolesSynced { get; set; }
+
+    /// <summary>
+    /// 返回备战席槽位数（客户端 grid_fight_max_avatar_count），固定为 9。
+    /// </summary>
+    public uint GetBenchSlotCount() => BenchSlotCount;
+
+    /// <summary>
+    /// 是否持有财富宝钻；物品栏与角色穿戴均计入（装备实例统一保存在 Equipments 中）。
+    /// </summary>
+    public bool HasWealthGem() =>
+        Equipments.Any(e => e.GridFightEquipmentId == WealthGemEquipmentId);
+
+    /// <summary>
+    /// 返回由装备/策略等提供的出战总人数额外上限（如财富宝钻 +1）。
+    /// </summary>
+    public uint GetDeployCapBonus() => HasWealthGem() ? 1u : 0u;
+
+    /// <summary>
+    /// Builds the deployment limit from player-level data and equipment bonuses.
+    /// </summary>
+    public GridFightSyncData BuildMaxBattleRoleNumSyncData() =>
+        new() { MaxBattleRoleNum = GetCurrentMaxBattleRoleNum() };
+
+    /// <summary>
+    /// 构建后台区域物理格数 sync（GridFightOffFieldMaxCount = 总人数 - 前台 4 格）。
+    /// </summary>
+    public GridFightSyncData BuildOffFieldMaxCountSyncData() =>
+        new() { GridFightOffFieldMaxCount = GetCurrentOffFieldMaxCount() };
+
+    /// <summary>
+    /// 返回后台出战席物理格数；与 MaxBattleRoleNum 配套下发以扩展客户端棋盘。
+    /// </summary>
+    public uint GetCurrentOffFieldMaxCount() =>
+        GetCurrentMaxBattleRoleNum() > BattlefieldForegroundMax
+            ? GetCurrentMaxBattleRoleNum() - BattlefieldForegroundMax
+            : 0;
+
+    /// <summary>
+    /// 出战席布局相关 sync：总人数上限 + 后台物理格数。
+    /// </summary>
+    public IEnumerable<GridFightSyncData> BuildBattlefieldLayoutSyncData()
+    {
+        yield return BuildMaxBattleRoleNumSyncData();
+        yield return BuildOffFieldMaxCountSyncData();
+    }
+
+    /// <summary>
+    /// 向 sync 段追加出战席布局字段（MaxBattleRoleNum + GridFightOffFieldMaxCount）。
+    /// </summary>
+    public static void AppendBattlefieldLayoutSync(GridFightSyncResultData sync, GridFightInstance inst)
+    {
+        foreach (var entry in inst.BuildBattlefieldLayoutSyncData())
+            sync.UpdateDynamicList.Add(entry);
+    }
+
+    /// <summary>
+    /// Keeps level-based progression instead of unlocking all 13 slots at startup.
+    /// </summary>
     public uint GetCurrentMaxBattleRoleNum()
     {
-        if (GameData.GridFightPlayerLevelData.TryGetValue(PlayerLevel, out var conf))
-            return Math.Clamp(conf.AvatarMaxNumber, 0u, 13u);
-        return 4;
+        var baseLimit = GameData.GridFightPlayerLevelData.TryGetValue(PlayerLevel, out var config)
+            ? Math.Min(config.AvatarMaxNumber, MaxBattleDeployTotal)
+            : BattlefieldForegroundMax;
+        return Math.Min(baseLimit + GetDeployCapBonus(), MaxBattleDeployTotal);
+    }
+
+    /// <summary>
+    /// Counts roles currently placed on the battlefield (pos 1-13).
+    /// </summary>
+    public uint GetDeployedBattleRoleCount() =>
+        (uint)UniqueIdByPos.Count(kv => kv.Key is >= 1 and <= 13 && kv.Value != 0);
+
+    /// <summary>
+    /// Tries to allocate the next free bench slot (pos 14+).
+    /// </summary>
+    public bool TryAllocBenchPos(out uint pos)
+    {
+        pos = 0;
+        for (uint i = 0; i < GetBenchSlotCount(); i++)
+        {
+            var candidate = BenchPosMin + i;
+            if (UniqueIdByPos.ContainsKey(candidate)) continue;
+            pos = candidate;
+            return true;
+        }
+
+        return false;
     }
 
     private void AddPlayerExp(uint value)
@@ -935,17 +1685,12 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
     private void ApplyRoleGrant(OrbUseResult r, uint roleId)
     {
         if (!GameData.GridFightRoleBasicInfoData.TryGetValue(roleId, out var roleExcel)) return;
-        uint pos = 0;
-        foreach (var candidate in new uint[] { 14, 15, 16, 17, 18, 19, 6, 7, 8, 9, 10, 11, 12, 13 })
-        {
-            if (!UniqueIdByPos.ContainsKey(candidate)) { pos = candidate; break; }
-        }
-        if (pos == 0) return;
+        if (!TryAllocBenchPos(out var pos)) return;
         var uid = AllocRoleUniqueId();
-        RoleByUniqueId[uid] = roleExcel.AvatarID;
+        RoleByUniqueId[uid] = roleId;
         RoleStarByUniqueId[uid] = 1;
         UniqueIdByPos[pos] = uid;
-        r.AddRoleId = roleExcel.AvatarID;
+        r.AddRoleId = roleId;
         r.AddRoleUniqueId = uid;
         r.AddRolePos = pos;
         if (roleExcel.RoleSavedValueList.Count > 0)
@@ -1040,17 +1785,26 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
     
     
     
+    /// <summary>
+    /// Resolves the elite group id used by battle monsters for the current section.
+    /// </summary>
     public uint ResolveEliteGroupForCurrentSection()
     {
         var route = Battle.GridFightLevelResolver.ResolveRoute(this);
-        if (route == null) return 1816;
-        if (route.NodeType == Enums.GridFight.GridFightNodeTypeEnum.Monster)
+        if (route?.NodeType == Enums.GridFight.GridFightNodeTypeEnum.Monster)
             return ResolveRewardEliteGroup(CurrentChapterId, SectionId);
-        if (route.NodeType == Enums.GridFight.GridFightNodeTypeEnum.Supply)
+        if (route?.NodeType == Enums.GridFight.GridFightNodeTypeEnum.Supply)
             return 0;
-        
-        var n = CountCombatNodesUpToCurrent();
-        return 1800u + Math.Max(1u, n);
+
+        return ResolveCombatEliteGroup();
+    }
+
+    /// <summary>
+    /// Returns the combat-progression elite group id shown in level/shop sync payloads.
+    /// </summary>
+    public uint ResolveCombatEliteGroup()
+    {
+        return 1800u + Math.Max(1u, CountCombatNodesUpToCurrent());
     }
 
     private static uint ResolveRewardEliteGroup(uint chapter, uint section)
@@ -1063,16 +1817,78 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
 
     private uint CountCombatNodesUpToCurrent()
     {
-        if (!GameData.GridFightStageRouteData.TryGetValue(RouteId, out var bucket)) return 1;
+        var route = Battle.GridFightLevelResolver.ResolveRoute(this);
+        if (route == null)
+            return 1;
+
+        if (!GameData.GridFightStageRouteData.TryGetValue(route.ID, out var bucket))
+            return 1;
+
         uint count = 0;
         foreach (var r in bucket.Values.OrderBy(r => r.ChapterID).ThenBy(r => r.SectionID))
         {
             if (r.NodeType == Enums.GridFight.GridFightNodeTypeEnum.Supply) continue;
-            if (r.NodeType == Enums.GridFight.GridFightNodeTypeEnum.Monster) continue; 
+            if (r.NodeType == Enums.GridFight.GridFightNodeTypeEnum.Monster) continue;
             count++;
-            if (r.ChapterID == CurrentChapterId && r.SectionID == SectionId) return count;
+            if (r.ChapterID == CurrentChapterId && r.SectionID == SectionId)
+                return count;
         }
-        return count;
+
+        return 1;
+    }
+
+    /// <summary>
+    /// Aligns RouteId with the resolved stage-route table for the current chapter/section.
+    /// </summary>
+    public void EnsureRouteBinding()
+    {
+        var route = Battle.GridFightLevelResolver.ResolveRoute(this);
+        if (route != null)
+            RouteId = route.ID;
+    }
+
+    /// <summary>
+    /// Builds the route layer payload used by the client node map and battle preview.
+    /// </summary>
+    public GridFightLayerInfo BuildCurrentLayerInfo()
+    {
+        EnsureRouteBinding();
+
+        var routeInfo = new GridFightRouteInfo
+        {
+            FightCampId = 20,
+            EliteBranchId = CurrentBranchId > 0 ? CurrentBranchId : 1u
+        };
+
+        if (BattleComponent.StageId > 0 && BattleComponent.MonsterIds.Count > 0)
+        {
+            AppendRouteEncounter(routeInfo, BattleComponent.StageId, BattleComponent.MonsterIds);
+        }
+        else if (GridFightLevelResolver.IsCombatNode(this))
+        {
+            var encounter = GridFightLevelResolver.Resolve(this);
+            AppendRouteEncounter(routeInfo, encounter.StageId,
+                encounter.Monsters.Select(m => (m.MonsterId, m.RoleStar)));
+        }
+
+        return new GridFightLayerInfo { RouteInfo = routeInfo };
+    }
+
+    private static void AppendRouteEncounter(GridFightRouteInfo routeInfo, uint stageId,
+        IEnumerable<uint> monsterIds)
+    {
+        AppendRouteEncounter(routeInfo, stageId, monsterIds.Select(id => (id, 1u)));
+    }
+
+    private static void AppendRouteEncounter(GridFightRouteInfo routeInfo, uint stageId,
+        IEnumerable<(uint MonsterId, uint RoleStar)> monsterIds)
+    {
+        var encounterInfo = new GridFightEncounterInfo { LFKBMDHKPFI = stageId };
+        var wave = new GridEncounterMonsterWave { IGMMPDDCJIN = 1 };
+        foreach (var (monsterId, roleStar) in monsterIds)
+            wave.PPOEDDFFEKK.Add(new PJLBDMPEKFP { MonsterId = monsterId, RoleStar = roleStar });
+        encounterInfo.MonsterWaveList.Add(wave);
+        routeInfo.RouteEncounterList.Add(encounterInfo);
     }
 
     public bool TryEquipFromDraft(uint idx)
@@ -1170,6 +1986,33 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         return picks;
     }
 
+    /// <summary>
+    /// 判断战斗统计上报的 role_id 是否与出战角色匹配（兼容 AvatarID / 内部 RoleId）。
+    /// </summary>
+    private static bool MatchesBattleStatRoleId(uint reportedRoleId, uint roleKey)
+    {
+        if (reportedRoleId == 0 || roleKey == 0) return false;
+        if (reportedRoleId == roleKey) return true;
+        if (reportedRoleId == GridFightRoleLookup.ToSyncRoleId(roleKey)) return true;
+        if (reportedRoleId == GridFightRoleLookup.ToAvatarId(roleKey)) return true;
+        return reportedRoleId == GridFightRoleLookup.ToRoleId(roleKey);
+    }
+
+    /// <summary>
+    /// 根据战斗统计 role_id 查找对应出战角色（pos 1-13）。
+    /// </summary>
+    private (uint uniqueId, uint roleKey)? FindDeployedRoleByBattleStatId(uint reportedRoleId)
+    {
+        foreach (var (pos, uniqueId) in UniqueIdByPos.Where(kv => kv.Key is >= 1 and <= 13 && kv.Value != 0))
+        {
+            if (!RoleByUniqueId.TryGetValue(uniqueId, out var roleKey)) continue;
+            if (MatchesBattleStatRoleId(reportedRoleId, roleKey))
+                return (uniqueId, roleKey);
+        }
+
+        return null;
+    }
+
     public void RecordBattleSnapshot(PVEBattleResultCsReq req, bool win)
     {
         PreBattleLineupHp = LineupHp;
@@ -1186,12 +2029,19 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
             {
                 var roleId = entry.RoleId;
                 if (roleId == 0) continue;
+                var deployed = FindDeployedRoleByBattleStatId(roleId);
+                var syncRoleId = deployed != null
+                    ? GridFightRoleLookup.ToSyncRoleId(deployed.Value.roleKey)
+                    : GridFightRoleLookup.ToSyncRoleId(roleId);
+                var roleStar = deployed != null
+                    ? RoleStarByUniqueId.GetValueOrDefault(deployed.Value.uniqueId, 1u)
+                    : 1u;
                 var inActive = entry.Damage > 0 || entry.BOIEGPAPHOP > 0;
-                if (inActive) activeRoleIds.Add(roleId);
+                if (inActive) activeRoleIds.Add(syncRoleId);
                 LastBattleDamageStt.EABPCKEDDBH.Add(new HHHMMJBGCNG
                 {
-                    RoleId = roleId,
-                    RoleStar = 1,
+                    RoleId = syncRoleId,
+                    RoleStar = roleStar,
                     TotalDamage = entry.Damage,
                     LDMNBDIDFCC = inActive,
                     HNLEDBPGDBC = !inActive
@@ -1291,7 +2141,7 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
             HPOACJCPJHN = win,
             PACIAIJBOHO = KeepWinCnt,
             IDEAAPCCFPF = LastBattleIDEAAPCCFPF,
-            IPCFJBAKLCG = 10,
+            IPCFJBAKLCG = GetCurrentMaxBattleRoleNum(),
             MAGCGPMHHEA = PlayerMaxLevel,
             GCBBEEGANEG = new MIOMFOAEHEC
             {
@@ -1327,9 +2177,17 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         return GridFightBattleModule.StartBattle(Player, this);
     }
 
+    public uint LastConfiguredBattleSection { get; set; }
+
+    public bool NeedsBattleEncounterConfiguration()
+    {
+        return LastConfiguredBattleSection != SectionId;
+    }
+
     public void ConfigureNextBattle(uint stageId, IEnumerable<uint> monsterIds)
     {
         BattleComponent.SetEncounter(stageId, monsterIds);
+        LastConfiguredBattleSection = SectionId;
     }
 
     public async ValueTask EndBattle(BattleInstance battle, PVEBattleResultCsReq req)
@@ -1356,6 +2214,8 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
 
         if (isSeasonFinish)
         {
+            if (req.EndStatus == BattleEndStatus.BattleEndWin && Player.DailyActivityManager != null)
+                await Player.DailyActivityManager.RecordProgress(2100156, 1);
             BattlesFinished++;
             await Player.SendPacket(new PacketGridFightSyncKeepWinCntNotify(1));
             await Player.SendPacket(new PacketGridFightSettleNotify(Player));
@@ -1366,7 +2226,6 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         await Player.SendPacket(new PacketGridFightSyncUpdateResultScNotify(Player, GridFightSyncKind.PostBattle));
 
         OnBattleResolved(win);
-        await Player.SendPacket(new PacketGridFightSyncUpdateResultScNotify(Player, GridFightSyncKind.RefreshShop));
     }
 
     public GridFightCurrentInfo ToProto()
@@ -1437,15 +2296,15 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         GridBasicInfo = new GridFightGameBasicInfo
         {
             ANBBPPHBCJH = 3,
-            FLEJPPKLJIC = 3,
-            HAEOPKELNEO = 10,
+            FLEJPPKLJIC = PlayerLevel,
+            HAEOPKELNEO = GetCurrentMaxBattleRoleNum(),
             Gold = Gold,
-            GridFightBuyExpCost = 4,
+            GridFightBuyExpCost = GetBuyExpCost(),
             GridFightLineupHp = LineupHp,
             GridFightLineupMaxHp = LineupMaxHp,
             GridFightMaxAvatarCount = 9,
             GridFightMaxInterestGold = 5,
-            GridFightOffFieldMaxCount = 6,
+            GridFightOffFieldMaxCount = GetCurrentOffFieldMaxCount(),
             GridFightSyncCurtaskInfo = new GridFightSyncCurrentTaskInfo(),
             GameLockInfo = new GridFightLockInfo()
         }
@@ -1456,15 +2315,17 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         var team = new GridFightGameTeamInfo();
         foreach (var (pos, uniqueId) in UniqueIdByPos.OrderBy(kv => kv.Key))
         {
-            if (uniqueId == 0 || !RoleByUniqueId.TryGetValue(uniqueId, out var avatarId)) continue;
+            if (uniqueId == 0 || !RoleByUniqueId.TryGetValue(uniqueId, out var roleKey)) continue;
             team.GridGameRoleList.Add(new GridGameRoleInfo
             {
-                Id = avatarId,
+                Id = GridFightRoleLookup.ToSyncRoleId(roleKey),
                 Pos = pos,
                 RoleStar = RoleStarByUniqueId.GetValueOrDefault(uniqueId, 1u),
                 UniqueId = uniqueId
             });
         }
+
+        PopulatePrepRoleAugmentBindings(team);
         return new GridFightGameInfo { GridTraitGameInfo = team };
     }
 
@@ -1482,17 +2343,7 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
         {
             GLIFNMBMMBL = ShopRefreshLeft,
             DNOIFMMLJDN = { ShopRolePool },
-            LDEDGOOKHFL = new FJPONJFLOOH
-            {
-                EDJPMNLLGGB =
-                {
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 1, FLICPMGFKOK = 100 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 2 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 3 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 4 },
-                    new MJJEHCBNOKI { MMKNFIFOPPA = 5 }
-                }
-            },
+            LDEDGOOKHFL = BuildShopRarityDisplayInfo(),
             ShopGoodsList = { ShopGoods }
         }
     };
@@ -1517,7 +2368,8 @@ public class GridFightInstance(PlayerInstance player, uint season, uint division
             SectionId = SectionId,
             ECCGJDMOGAN = new DDJIOFONKME(),
             BossInfo = new GridFightBossInfo(),
-            CMHBDMOJJEN = new IKFEDFBLOOG()
+            CMHBDMOJJEN = new IKFEDFBLOOG(),
+            GridFightLayerInfo = BuildCurrentLayerInfo()
         };
         EnsureSessionPreview();
         foreach (var campId in SessionCampIds)

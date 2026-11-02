@@ -20,7 +20,6 @@ public class PacketGetBasicInfoScRsp : BasePacket
 
         if (ConfigManager.Config.ServerOption.EnableMission)
         {
-            if (player.AvatarManager!.GetHero()!.PathInfos.Count > 0) player.Data.IsGenderSet = true;
             proto.Gender = (uint)player.Data.CurrentGender;
             proto.IsGenderSet = player.Data.IsGenderSet;
         }

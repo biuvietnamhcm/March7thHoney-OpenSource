@@ -22,6 +22,14 @@ public class EntityProp(SceneInstance scene, MazePropExcel excel, GroupInfo grou
     public override int EntityId { get; set; }
     public override int GroupId { get; set; } = group.Id;
 
+    public bool IsPersistentWorldChest => Excel.PropType == PropTypeEnum.PROP_TREASURE_CHEST
+        && Scene.Excel.PlaneType is PlaneTypeEnum.Town or PlaneTypeEnum.Maze or PlaneTypeEnum.Train;
+
+    public bool WasOpened => IsPersistentWorldChest &&
+        (State == PropStateEnum.ChestUsed ||
+         Scene.Player.GetScenePropData(Scene.FloorId, GroupId, PropInfo.ID) is
+             { ChestOpened: true } or { State: PropStateEnum.ChestUsed });
+
     public override SceneEntityInfo ToProto()
     {
         var prop = new ScenePropInfo
@@ -52,20 +60,23 @@ public class EntityProp(SceneInstance scene, MazePropExcel excel, GroupInfo grou
 
     public async ValueTask SetState(PropStateEnum state)
     {
-        if (state == State) return;
+        if (state == State && !IsPersistentWorldChest) return;
         await SetState(state, Scene.IsLoaded);
     }
 
     public async ValueTask SetState(PropStateEnum state, bool sendPacket)
     {
-        
+        // Puzzle scripts and reset groups must never re-close a claimed world chest.
+        if (WasOpened) state = PropStateEnum.ChestUsed;
         State = state;
+        // Persist before awaiting network I/O. Reset applies to the puzzle, not its chest reward.
+        if ((IsPersistentWorldChest && state == PropStateEnum.ChestUsed) || Group.SaveType != SaveTypeEnum.Reset)
+            Scene.Player.SetScenePropData(Scene.FloorId, Group.Id, PropInfo.ID, state,
+                IsPersistentWorldChest && state == PropStateEnum.ChestUsed);
+
         if (sendPacket)
             await Scene.Player.SendPacket(new PacketSceneGroupRefreshScNotify(Scene.Player, this, null,
                 SceneGroupRefreshType.Afibfmafncc));
 
-        
-        if (Group.SaveType == SaveTypeEnum.Reset) return;
-        Scene.Player.SetScenePropData(Scene.FloorId, Group.Id, PropInfo.ID, state);
     }
 }

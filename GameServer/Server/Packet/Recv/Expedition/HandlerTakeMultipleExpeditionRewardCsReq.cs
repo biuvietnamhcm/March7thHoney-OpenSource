@@ -24,6 +24,7 @@ public class HandlerTakeMultipleExpeditionRewardCsReq : Handler
         if (rewards.Count > 0) await player.InventoryManager!.AddItems(rewards);
 
         manager.MarkRewardTaken();
+        if (player.DailyActivityManager != null) await player.DailyActivityManager.RecordProgress(2100133, 1);
 
         await connection.SendPacket(new PacketTakeMultipleExpeditionRewardScRsp(
             player,

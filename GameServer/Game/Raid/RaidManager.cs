@@ -294,7 +294,16 @@ public class RaidManager : BasePlayerManager
             Player.SceneData!.GroupPropertyData.Remove(floorId);
             Player.SceneData!.FloorTargetPuzzleGroupData.Remove(floorId);
             Player.SceneData!.FloorSavedData.Remove(floorId);
-            Player.SceneData!.ScenePropData.Remove(floorId);
+            if (Player.SceneData!.ScenePropData.TryGetValue(floorId, out var groups))
+            {
+                // Shared floors can contain permanent exploration chests as well as raid state.
+                foreach (var groupId in groups.Keys.ToList())
+                {
+                    groups[groupId].RemoveAll(prop => !prop.ChestOpened);
+                    if (groups[groupId].Count == 0) groups.Remove(groupId);
+                }
+                if (groups.Count == 0) Player.SceneData.ScenePropData.Remove(floorId);
+            }
         }
 
         await Player.SendPacket(new PacketDelSaveRaidScNotify(raidId, worldLevel));

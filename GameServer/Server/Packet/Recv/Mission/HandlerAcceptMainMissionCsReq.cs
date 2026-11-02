@@ -12,8 +12,8 @@ public class HandlerAcceptMainMissionCsReq : Handler
         var req = AcceptMainMissionCsReq.Parser.ParseFrom(data);
         var missionId = req.MainMissionId;
 
-        await connection.Player!.MissionManager!.AcceptMainMission((int)missionId);
+        var retcode = await connection.Player!.MissionManager!.AcceptMainMissionFromClient((int)missionId);
 
-        await connection.SendPacket(new PacketAcceptMainMissionScRsp(missionId));
+        await connection.SendPacket(new PacketAcceptMainMissionScRsp(missionId, retcode));
     }
 }

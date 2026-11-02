@@ -17,6 +17,9 @@ namespace March7thHoney.Data;
 
 public static class GameData
 {
+    public static Dictionary<int, DailyActiveConfigExcel> DailyActiveConfigData { get; private set; } = [];
+    public static Dictionary<int, DailyQuestExcel> DailyQuestData { get; private set; } = [];
+    public static Dictionary<int, DailyMissionExcel> DailyMissionData { get; private set; } = [];
     #region Banners
 
     public static BannersConfig BannersConfig { get; set; } = new();

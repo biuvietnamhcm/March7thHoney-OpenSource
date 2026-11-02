@@ -410,6 +410,7 @@ public class BattleManager(PlayerInstance player) : BasePlayerManager(player)
         
         battle.MonsterDropItems = dropItems;
         battle.BattleResult = req;
+        if (Player.DailyActivityManager != null) await Player.DailyActivityManager.OnBattleFinished(battle);
 
         Player.BattleInstance = null;
 

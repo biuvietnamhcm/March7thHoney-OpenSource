@@ -32,6 +32,41 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
     #region Mission Actions
 
+    private readonly SemaphoreSlim _itemHandIn = new(1, 1);
+
+    public async ValueTask<Retcode> ConsumeMissionItems(int missionId)
+    {
+        await _itemHandIn.WaitAsync();
+        try
+        {
+            if (Player.DailyActivityManager != null) await Player.DailyActivityManager.RefreshAsync();
+            var mission = GetSubMissionInfo(missionId);
+            if (mission?.FinishType != MissionFinishTypeEnum.ConsumeMissionItem ||
+                GetSubMissionStatus(missionId) != MissionPhaseEnum.Accept) return Retcode.RetMissionNotDoing;
+            var costs = (mission.ParamItemList ?? []).GroupBy(x => x.ItemID)
+                .Select(x => new ItemData { ItemId = x.Key, Count = x.Sum(y => y.ItemNum) }).ToList();
+            if (costs.Count == 0 || Player.InventoryManager == null ||
+                costs.Any(x => x.Count <= 0 || (Player.InventoryManager.GetItem(x.ItemId)?.Count ?? 0) < x.Count))
+                return Retcode.RetItemNotEnough;
+            foreach (var item in costs) await Player.InventoryManager.RemoveItem(item.ItemId, item.Count);
+            await FinishSubMission(missionId);
+            return Retcode.RetSucc;
+        }
+        finally { _itemHandIn.Release(); }
+    }
+
+    public async ValueTask<Retcode> AcceptMainMissionFromClient(int missionId)
+    {
+        if (!ConfigManager.Config.ServerOption.EnableMission) return Retcode.RetSucc;
+        if (!GameData.MainMissionData.TryGetValue(missionId, out var mission)) return Retcode.RetMissionNotExist;
+        var status = Data.GetMainMissionStatus(missionId);
+        if (status == MissionPhaseEnum.Finish) return Retcode.RetMissionAlreadyDone;
+        if (status == MissionPhaseEnum.Accept) return Retcode.RetSucc;
+        if (!mission.IsEqual(Data)) return Retcode.RetMissionNotFinish;
+        await AcceptMainMission(missionId);
+        return Retcode.RetSucc;
+    }
+
     public List<int> GetAllFinishedMissionIds()
     {
         return Data.FinishedSubMissionIds
@@ -53,12 +88,15 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
         Data.SetMainMissionStatus(missionId, MissionPhaseEnum.Accept);
 
         var list = new List<MissionSync?>();
-        mission.MissionInfo?.StartSubMissionList.ForEach(async i => list.Add(await AcceptSubMission(i, sendPacket)));
+        foreach (var id in mission.MissionInfo?.StartSubMissionList ?? [])
+            list.Add(await AcceptSubMission(id, sendPacket));
         if (missionId == 4030001 || missionId == 4030002)
         {
             
-            mission.MissionInfo?.SubMissionList.ForEach(async x => await AcceptSubMission(x.ID));
-            mission.MissionInfo?.SubMissionList.ForEach(async x => await FinishSubMission(x.ID));
+            foreach (var subMission in mission.MissionInfo?.SubMissionList ?? [])
+                await AcceptSubMission(subMission.ID);
+            foreach (var subMission in mission.MissionInfo?.SubMissionList ?? [])
+                await FinishSubMission(subMission.ID);
         }
 
         if (missionId == 1000400)
@@ -172,6 +210,11 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
         if (sendPacket) await Player.SendPacket(new PacketPlayerSyncScNotify(sync));
         Player.SceneInstance?.SyncGroupInfo();
+
+        // Apply mission setup (trial party, props, transfers) before checking its completion condition.
+        if (Player.TaskManager != null)
+            await Player.TaskManager.MissionTaskTrigger.TriggerMissionTask(missionId);
+
         if (mission.SubMissionInfo != null)
             try
             {
@@ -180,8 +223,9 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
                     if (handler != null)
                         await handler.HandleMissionFinishType(Player, mission.SubMissionInfo, null);
             }
-            catch
+            catch (Exception ex)
             {
+                Logger.GetByClassName().Error($"Failed to evaluate sub-mission {missionId}", ex);
             }
 
         if (SkipSubMissionList.Contains(missionId)) await FinishSubMission(missionId);
@@ -192,8 +236,8 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
                     await Player.SceneInstance!.EntityLoader!.LoadGroup(group);
 
         
-        Player.TaskManager?.MissionTaskTrigger.TriggerMissionTask(missionId);
-
+        sync.MissionList[0].Status = Data.GetSubMissionStatus(missionId).ToProto();
+        sync.MissionList[0].Progress = (uint)GetMissionProgress(missionId);
         return sync;
     }
 
@@ -231,7 +275,9 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
         await Player.RaidManager!.CheckIfLeaveRaid();
 
+        if (Player.DailyActivityManager != null) await Player.DailyActivityManager.OnMissionFinished(missionId);
         PluginEvent.InvokeOnPlayerFinishMainMission(Player, missionId);
+        DatabaseHelper.Instance?.SaveUidData(Player.Uid);
     }
 
     public async ValueTask FinishSubMission(int missionId)
@@ -256,6 +302,9 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
         });
 
         
+        if (mainMission.MissionInfo != null)
+            await HandleFinishAction(mainMission.MissionInfo, missionId);
+
         foreach (var nextMission in mainMission.MissionInfo?.SubMissionList ?? [])
         {
             if (nextMission.TakeType != SubMissionTakeTypeEnum.AnySequence &&
@@ -279,11 +328,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
             {
                 var s = await AcceptSubMission(nextMission.ID, false, false);
                 if (s != null)
-                    sync.MissionList.Add(new Proto.Mission
-                    {
-                        Id = (uint)nextMission.ID,
-                        Status = MissionStatus.MissionDoing
-                    });
+                    sync.MissionList.AddRange(s.MissionList);
             }
         }
 
@@ -291,12 +336,9 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
         await Player.SendPacket(new PacketStartFinishSubMissionScNotify(missionId));
         await Player.SendPacket(new PacketFinishedMissionScNotify(missionId));
 
-        if (mainMission.MissionInfo != null)
-            await HandleFinishAction(mainMission.MissionInfo, missionId);
-
         
         
-        var shouldFinish = true;
+        var shouldFinish = mainMission.MissionInfo?.FinishSubMissionList.Count > 0;
         mainMission.MissionInfo?.FinishSubMissionList.ForEach(id =>
         {
             if (GetSubMissionStatus(id) != MissionPhaseEnum.Finish) shouldFinish = false;
@@ -331,6 +373,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
         
 
         PluginEvent.InvokeOnPlayerFinishSubMission(Player, missionId);
+        DatabaseHelper.Instance?.SaveUidData(Player.Uid);
     }
 
     public async ValueTask HandleFinishAction(MissionInfo info, int subMissionId)
@@ -413,6 +456,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
         foreach (var quest in Player.QuestManager?.GetRunningQuest() ?? [])
         {
+            if (Player.DailyActivityManager?.IsDailyQuest(quest.QuestId) == true) continue;
             var excel = GameData.QuestDataData.GetValueOrDefault(quest.QuestId);
             if (excel == null) continue;
             var finishWay = GameData.FinishWayData.GetValueOrDefault(excel.FinishWayID);
@@ -434,6 +478,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
     public async ValueTask HandleTalkStr(string talkString)
     {
+        if (Player.DailyActivityManager != null) await Player.DailyActivityManager.RefreshAsync();
         if (!ConfigManager.Config.ServerOption.EnableMission) return;
 
         foreach (var mission in GetRunningSubMissionList())
@@ -443,6 +488,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
         foreach (var quest in Player.QuestManager?.GetRunningQuest() ?? [])
         {
+            if (Player.DailyActivityManager?.IsDailyQuest(quest.QuestId) == true) continue;
             var excel = GameData.QuestDataData.GetValueOrDefault(quest.QuestId);
             if (excel == null) continue;
             var finishWay = GameData.FinishWayData.GetValueOrDefault(excel.FinishWayID);
@@ -511,6 +557,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
         Data.SubMissionProgressDict.TryGetValue(missionId, out var currentProgress);
         Data.SubMissionProgressDict[missionId] = currentProgress + progress;
+        DatabaseHelper.ToSaveUidList.SafeAdd(Player.Uid);
         GameData.SubMissionInfoData.TryGetValue(missionId, out var subMission);
         if (subMission == null) return;
 
@@ -531,6 +578,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
         if (!ConfigManager.Config.ServerOption.EnableMission) return;
 
         Data.SubMissionProgressDict[missionId] = progress;
+        DatabaseHelper.ToSaveUidList.SafeAdd(Player.Uid);
         GameData.SubMissionInfoData.TryGetValue(missionId, out var subMission);
         if (subMission == null) return;
 
@@ -617,7 +665,8 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
             var subMission = GetSubMissionInfo(mission);
             if (subMission != null && subMission.FinishType == MissionFinishTypeEnum.StageWin &&
                 req.EndStatus == BattleEndStatus.BattleEndWin) 
-                if (req.StageId.ToString().StartsWith(subMission.ParamInt1.ToString()))
+                if (req.StageId == instance.StageId &&
+                    (instance.StageId == subMission.ParamInt1 || instance.StageId / 10 == subMission.ParamInt1))
                 {
                     await FinishSubMission(mission);
                     instance.EventId = 0;
@@ -684,7 +733,7 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
         
         
         var currentFloor = Player.SceneInstance?.FloorId ?? 0;
-        if (currentFloor != 0)
+        if (!ConfigManager.Config.ServerOption.EnableMission && currentFloor != 0)
             foreach (var pkg in GameData.ContentPackageConfigData.Values)
             {
                 if (pkg.MainMissionIDList.Count == 0) continue;

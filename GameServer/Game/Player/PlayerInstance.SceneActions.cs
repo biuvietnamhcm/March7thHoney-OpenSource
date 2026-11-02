@@ -1,4 +1,5 @@
 using March7thHoney.Data;
+using March7thHoney.Database;
 using March7thHoney.Database.Scene;
 using March7thHoney.Enums.Mission;
 using March7thHoney.Enums.Scene;
@@ -17,6 +18,7 @@ namespace March7thHoney.GameServer.Game.Player;
 
 public partial class PlayerInstance
 {
+    private readonly SemaphoreSlim _worldChestInteractionLock = new(1, 1);
     #region Scene Actions
 
     public async ValueTask OnMove()
@@ -38,10 +40,40 @@ public partial class PlayerInstance
         if (SceneInstance == null) return null;
         SceneInstance.Entities.TryGetValue(propEntityId, out var entity);
         if (entity is not EntityProp prop) return null;
+        if (!prop.IsPersistentWorldChest) return await InteractPropCore(prop, interactId);
+
+        await _worldChestInteractionLock.WaitAsync();
+        try
+        {
+            // The entity ID may have been reused by a scene change while waiting.
+            if (SceneInstance != prop.Scene) return null;
+            if (prop.WasOpened)
+            {
+                await prop.SetState(PropStateEnum.ChestUsed);
+                return prop;
+            }
+            return await InteractPropCore(prop, interactId);
+        }
+        finally
+        {
+            _worldChestInteractionLock.Release();
+        }
+    }
+
+    private async ValueTask<EntityProp?> InteractPropCore(EntityProp prop, int interactId)
+    {
         GameData.InteractConfigData.TryGetValue(interactId, out var config);
         if (config == null || config.SrcState != prop.State) return prop;
         var oldState = prop.State;
-        await prop.SetState(config.TargetState);
+        var opensWorldChest = prop.IsPersistentWorldChest && oldState == PropStateEnum.ChestClosed
+            && config.TargetState == PropStateEnum.ChestUsed;
+        // Leave the chest claimable when its reward resources are missing.
+        var chestItems = opensWorldChest ? DropService.CalculateDropsFromProp(prop.PropInfo.ChestID) : null;
+        if (opensWorldChest && (InventoryManager == null || SceneData == null || chestItems!.Count == 0 ||
+                               chestItems.Any(item => !GameData.ItemConfigData.ContainsKey(item.ItemId))))
+            return prop;
+
+        await prop.SetState(config.TargetState, opensWorldChest ? false : prop.Scene.IsLoaded);
         var newState = prop.State;
 
         switch (prop.Excel.PropType)
@@ -50,21 +82,30 @@ public partial class PlayerInstance
                 if (oldState == PropStateEnum.ChestClosed && newState == PropStateEnum.ChestUsed)
                 {
                     
-                    var items = DropService.CalculateDropsFromProp(prop.PropInfo.ChestID);
-                    await InventoryManager!.AddItems(items);
-                    await SendPacket(new PacketOpenChestScNotify(prop.PropInfo.ChestID));
-
+                    var items = chestItems ?? DropService.CalculateDropsFromProp(prop.PropInfo.ChestID);
                     var notifyMark = false;
                     foreach (var markedChest in SceneData!.MarkedChestData.Values)
                     {
                         var chest = markedChest.Find(x =>
-                            x.FloorId == SceneInstance.FloorId && x.GroupId == prop.GroupId &&
+                            x.FloorId == prop.Scene.FloorId && x.GroupId == prop.GroupId &&
                             x.ConfigId == prop.PropInfo.ID);
 
                         if (chest == null) continue;
                         markedChest.Remove(chest);
                         notifyMark = true;
                     }
+
+                    try
+                    {
+                        await InventoryManager!.AddItems(items);
+                    }
+                    finally
+                    {
+                        // Save the claim, removed map mark and inventory without waiting for the heartbeat timer.
+                        if (opensWorldChest) DatabaseHelper.Instance?.SaveUidData(Uid);
+                    }
+                    if (opensWorldChest) await prop.SetState(PropStateEnum.ChestUsed, prop.Scene.IsLoaded);
+                    await SendPacket(new PacketOpenChestScNotify(prop.PropInfo.ChestID));
 
                     if (notifyMark)
                         await SendPacket(new PacketMarkChestChangedScNotify(this));
@@ -173,7 +214,7 @@ public partial class PlayerInstance
             }
 
         
-        await MissionManager!.OnPlayerInteractWithProp();
+        if (MissionManager != null) await MissionManager.OnPlayerInteractWithProp();
 
         
         InventoryManager!.HandlePlaneEvent(prop.PropInfo.EventID);
@@ -206,7 +247,7 @@ public partial class PlayerInstance
             value[key] = 1; 
             await SendPacket(new PacketUpdateFloorSavedValueNotify(key, 1, this));
 
-            TaskManager?.SceneTaskTrigger.TriggerFloor(plane, floor);
+            if (TaskManager != null) await TaskManager.SceneTaskTrigger.TriggerFloor(plane, floor);
             MissionManager?.HandleFinishType(MissionFinishTypeEnum.FloorSavedValue);
         }
 
@@ -388,6 +429,8 @@ public partial class PlayerInstance
             Data.PlaneId = planeId;
             Data.FloorId = floorId;
             Data.EntryId = entryId;
+            // Floor scripts must see the newly assigned scene and its coordinates.
+            if (TaskManager != null) await TaskManager.SceneTaskTrigger.TriggerFloor(planeId, floorId);
         }
         else if (StoryLineManager?.StoryLineData.CurStoryLineId == 0 &&
                  mapTp) 
@@ -426,7 +469,7 @@ public partial class PlayerInstance
         return null;
     }
 
-    public void SetScenePropData(int floorId, int groupId, int propId, PropStateEnum state)
+    public void SetScenePropData(int floorId, int groupId, int propId, PropStateEnum state, bool chestOpened = false)
     {
         if (SceneData != null)
         {
@@ -448,14 +491,17 @@ public partial class PlayerInstance
                 propData = new ScenePropData
                 {
                     PropId = propId,
-                    State = state
+                    State = state,
+                    ChestOpened = chestOpened
                 };
                 groupData.Add(propData);
             }
             else
             {
-                propData.State = state;
+                propData.ChestOpened |= chestOpened;
+                propData.State = propData.ChestOpened ? PropStateEnum.ChestUsed : state;
             }
+            DatabaseHelper.ToSaveUidList.SafeAdd(Uid);
         }
     }
 

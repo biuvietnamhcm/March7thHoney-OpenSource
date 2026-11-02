@@ -1,6 +1,8 @@
 using March7thHoney.Data;
+using March7thHoney.Data.Excel;
 using March7thHoney.Database.Lineup;
 using March7thHoney.GameServer.Game.Battle;
+using March7thHoney.GameServer.Game.GridFight;
 using March7thHoney.GameServer.Game.Player;
 using March7thHoney.Proto;
 using LineupInfo = March7thHoney.Database.Lineup.LineupInfo;
@@ -14,12 +16,7 @@ public static class GridFightBattleModule
         if (player.BattleInstance != null)
             return player.BattleInstance;
 
-        var encounter = GridFightLevelResolver.Resolve(gridFightInstance);
-        var ok = GameData.StageConfigData.TryGetValue((int)encounter.StageId, out var stageConfig);
-        if (!ok)
-            ok = GameData.StageConfigData.TryGetValue((int)GridFightLevelResolver.UnifiedStageId, out stageConfig);
-        if (!ok)
-            stageConfig = GameData.StageConfigData.Values.FirstOrDefault();
+        var stageConfig = ResolveStageConfig(gridFightInstance);
         if (stageConfig == null)
             return null;
 
@@ -38,10 +35,29 @@ public static class GridFightBattleModule
         var battle = new BattleInstance(player, tempLineup, [stageConfig])
         {
             WorldLevel = player.Data.WorldLevel,
-            GridFightContext = gridFightInstance
+            GridFightContext = gridFightInstance,
+            LogicRandomSeed = (uint)Random.Shared.Next()
         };
 
         player.BattleInstance = battle;
+        player.QuestManager?.OnBattleStart(battle);
         return battle;
+    }
+
+    private static StageConfigExcel? ResolveStageConfig(GridFightInstance gridFightInstance)
+    {
+        var configuredStageId = gridFightInstance.BattleComponent.StageId;
+        if (configuredStageId > 0
+            && GameData.StageConfigData.TryGetValue((int)configuredStageId, out var configuredStage))
+            return configuredStage;
+
+        var encounter = GridFightLevelResolver.Resolve(gridFightInstance);
+        if (GameData.StageConfigData.TryGetValue((int)encounter.StageId, out var encounterStage))
+            return encounterStage;
+
+        if (GameData.StageConfigData.TryGetValue((int)GridFightLevelResolver.UnifiedStageId, out var unifiedStage))
+            return unifiedStage;
+
+        return GameData.StageConfigData.Values.FirstOrDefault();
     }
 }

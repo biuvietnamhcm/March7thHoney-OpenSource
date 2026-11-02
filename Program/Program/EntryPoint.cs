@@ -31,6 +31,14 @@ public class EntryPoint
 
     public static async Task Main(string[] args)
     {
+        // Allow installation checks without starting listeners or touching the player database.
+        if (args.Contains("--version"))
+        {
+            Console.WriteLine($"March7thHoney {GameConstants.GAME_VERSION}");
+            Console.WriteLine($"{System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription} / {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}");
+            return;
+        }
+
         IConsole.InitConsole();
         IConsole.RedrawInput(IConsole.Input);
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>

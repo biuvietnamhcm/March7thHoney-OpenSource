@@ -10,16 +10,64 @@ namespace March7thHoney.GameServer.Game.GridFight.PendingAction;
 
 public static class GridFightPendingActionProcessor
 {
+    /// <summary>
+    /// 处理客户端 pending 操作；队列位置不匹配时仅重推当前状态，避免重复结算。
+    /// </summary>
     public static async System.Threading.Tasks.Task Handle(Connection connection, GridFightInstance inst, GridFightSelectRecommendEquipCsReq req)
     {
         var ackPos = req.QueuePosition;
+
+        if (inst.PendingAction == null)
+        {
+            await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
+            return;
+        }
+
+        if (ackPos != inst.PendingAction.QueuePosition)
+        {
+            if (req.PortalBuffAction != null
+                && ackPos < inst.PendingAction.QueuePosition
+                && inst.IsPortalBuffSelectionPending())
+            {
+                await HandlePortalBuffSelect(connection, inst, ackPos, req.PortalBuffAction.SelectPortalBuffId);
+                return;
+            }
+
+            if (req.PortalBuffAction != null && inst.InitialBenchRolesSynced && ackPos < inst.PendingAction.QueuePosition)
+            {
+                await ResyncPortalBuffCompleted(connection, inst, ackPos);
+                return;
+            }
+
+            await ResyncPendingAction(connection, inst, ackPos);
+            return;
+        }
+
         if (req.PortalBuffRerollAction != null)
         {
+            if (inst.PendingAction.PortalBuffAction == null)
+            {
+                await ResyncPendingAction(connection, inst, ackPos);
+                return;
+            }
+
             await HandlePortalBuffReroll(connection, inst, ackPos);
             return;
         }
         if (req.PortalBuffAction != null)
         {
+            if (inst.PendingAction.PortalBuffAction == null)
+            {
+                if (inst.InitialBenchRolesSynced)
+                {
+                    await ResyncPortalBuffCompleted(connection, inst, ackPos);
+                    return;
+                }
+
+                await ResyncPendingAction(connection, inst, ackPos);
+                return;
+            }
+
             await HandlePortalBuffSelect(connection, inst, ackPos, req.PortalBuffAction.SelectPortalBuffId);
             return;
         }
@@ -53,6 +101,14 @@ public static class GridFightPendingActionProcessor
             await HandleEliteBranchSelect(connection, inst, ackPos, req.EliteBranchAction.EliteBranchId);
             return;
         }
+        if (inst.PendingAction.TraitAction != null)
+        {
+            if (req.TraitAction != null)
+                await GridFightHeadPlayerService.HandleTraitActionAsync(connection, inst, ackPos, req.TraitAction);
+            else
+                await GridFightHeadPlayerService.ResyncTraitPendingPublic(connection, inst, ackPos);
+            return;
+        }
         if (req.RoundBeginAction != null)
         {
             await HandleRoundBegin(connection, inst, ackPos);
@@ -64,6 +120,12 @@ public static class GridFightPendingActionProcessor
             return;
         }
 
+        if (inst.IsPortalBuffSelectionPending())
+        {
+            await ResyncPendingAction(connection, inst, ackPos);
+            return;
+        }
+
         inst.QueuePosition = ackPos + 1;
         inst.PendingAction = new GridFightPendingAction
         {
@@ -72,6 +134,76 @@ public static class GridFightPendingActionProcessor
         };
         await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
         await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(connection.Player!, GridFightSyncKind.PendingAdvance, (ackPos, inst.QueuePosition)));
+    }
+
+    /// <summary>
+    /// 向客户端重推当前 pending 状态，用于重复或过期请求。
+    /// </summary>
+    private static async System.Threading.Tasks.Task ResyncPendingAction(Connection connection, GridFightInstance inst, uint ackPos)
+    {
+        if (inst.PendingAction != null && ackPos < inst.PendingAction.QueuePosition)
+        {
+            await ResyncPortalBuffCompleted(connection, inst, ackPos);
+            return;
+        }
+
+        await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
+
+        if (inst.PendingAction == null) return;
+
+        var sync = new GridFightSyncUpdateResultScNotify();
+        var sec = new GridFightSyncResultData();
+        sec.UpdateDynamicList.Add(new GridFightSyncData
+        {
+            SyncLockInfo = new GridFightLockInfo
+            {
+                LockReason = GridFightLockReason.DfofffceffoKjmjdbjmbmc,
+                LockType = GridFightLockType.PjbmhhnlclbEhfhdgpocnh
+            }
+        });
+        sec.UpdateDynamicList.Add(new GridFightSyncData { PendingAction = inst.PendingAction });
+        sync.SyncResultDataList.Add(sec);
+        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(sync));
+    }
+
+    /// <summary>
+    /// 投资环境已结算但客户端仍重复提交时，补发完整 portal 完成 sync（含 buff、角色、关卡）。
+    /// </summary>
+    private static async System.Threading.Tasks.Task ResyncPortalBuffCompleted(Connection connection, GridFightInstance inst, uint ackPos)
+    {
+        if (inst.ActivePortalBuffIds.Count > 0)
+        {
+            var buffId = inst.ActivePortalBuffIds[^1];
+            var sync = BuildPortalBuffSelectSync(inst, ackPos, buffId, replayOnly: true);
+            await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(sync));
+            await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
+            return;
+        }
+
+        var fallback = new GridFightSyncUpdateResultScNotify();
+
+        var finishSec = new GridFightSyncResultData();
+        finishSec.UpdateDynamicList.Add(new GridFightSyncData { FinishPendingActionPos = ackPos });
+        finishSec.UpdateDynamicList.Add(new GridFightSyncData { SyncLockInfo = new GridFightLockInfo() });
+        fallback.SyncResultDataList.Add(finishSec);
+
+        if (inst.PendingAction != null)
+        {
+            var pendingSec = new GridFightSyncResultData();
+            pendingSec.UpdateDynamicList.Add(new GridFightSyncData
+            {
+                SyncLockInfo = new GridFightLockInfo
+                {
+                    LockReason = GridFightLockReason.DfofffceffoKjmjdbjmbmc,
+                    LockType = GridFightLockType.PjbmhhnlclbEhfhdgpocnh
+                }
+            });
+            pendingSec.UpdateDynamicList.Add(new GridFightSyncData { PendingAction = inst.PendingAction });
+            fallback.SyncResultDataList.Add(pendingSec);
+        }
+
+        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(fallback));
+        await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
     }
 
     private static async System.Threading.Tasks.Task HandlePortalBuffReroll(Connection connection, GridFightInstance inst, uint ackPos)
@@ -98,38 +230,66 @@ public static class GridFightPendingActionProcessor
 
     private static async System.Threading.Tasks.Task HandlePortalBuffSelect(Connection connection, GridFightInstance inst, uint ackPos, uint buffId)
     {
-        if (buffId > 0 && !inst.ActivePortalBuffIds.Contains(buffId)) inst.ActivePortalBuffIds.Add(buffId);
-        inst.ClearPortalBuffOffer();
-
-        uint requiredTrait = 0;
-        if (GameData.GridFightPortalBuffData.TryGetValue(buffId, out var buffData)
-            && buffData.PortalGameRefTrait.Count > 0)
+        if (buffId == 0)
         {
-            requiredTrait = buffData.PortalGameRefTrait[0];
+            await ResyncPendingAction(connection, inst, ackPos);
+            return;
         }
-        inst.MaterializeInitialBenchTeam(requiredTrait);
-        var encounter = GridFightLevelResolver.Resolve(inst);
-        inst.ConfigureNextBattle(encounter.StageId, encounter.Monsters.Select(m => m.MonsterId));
 
-        var nextPos = ackPos + 1;
-        inst.QueuePosition = nextPos;
-        inst.PendingAction = new GridFightPendingAction
+        var offer = inst.EnsurePortalBuffOffer();
+        if (offer.Count > 0 && !offer.Contains(buffId) && !inst.ActivePortalBuffIds.Contains(buffId))
         {
-            QueuePosition = nextPos,
-            RoundBeginAction = new GridFightRoundBeginActionInfo()
-        };
+            await ResyncPendingAction(connection, inst, ackPos);
+            return;
+        }
+
+        if (inst.IsPortalBuffSelectionPending())
+        {
+            if (buffId > 0 && !inst.ActivePortalBuffIds.Contains(buffId)) inst.ActivePortalBuffIds.Add(buffId);
+            inst.ClearPortalBuffOffer();
+
+            uint requiredTrait = 0;
+            if (GameData.GridFightPortalBuffData.TryGetValue(buffId, out var buffData)
+                && buffData.PortalGameRefTrait.Count > 0)
+            {
+                requiredTrait = buffData.PortalGameRefTrait[0];
+            }
+            inst.MaterializeInitialBenchTeam(requiredTrait);
+            var encounter = GridFightLevelResolver.Resolve(inst);
+            inst.ConfigureNextBattle(encounter.StageId, encounter.Monsters.Select(m => m.MonsterId));
+
+            var nextPos = ackPos + 1;
+            inst.QueuePosition = nextPos;
+            inst.PendingAction = new GridFightPendingAction
+            {
+                QueuePosition = nextPos,
+                RoundBeginAction = new GridFightRoundBeginActionInfo()
+            };
+
+            if (!inst.InitialBenchRolesSynced)
+                inst.InitialBenchRolesSynced = true;
+        }
 
         var handbook = new GridFightSeasonHandBookNotify { HandbookGridFightPortalInfo = new GridFightHandBookPortalInfo() };
         handbook.HandbookGridFightPortalInfo.GridFightPortalBuffList.Add(buffId);
+
+        var sync = BuildPortalBuffSelectSync(inst, ackPos, buffId, replayOnly: false);
+        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(sync));
         await connection.SendPacket(new PacketGridFightSeasonHandBookNotify(handbook));
         await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
+    }
 
+    /// <summary>
+    /// 构建 portal buff 选择完成后的 sync 包；replayOnly 为 true 时不重复写入实例状态。
+    /// </summary>
+    private static GridFightSyncUpdateResultScNotify BuildPortalBuffSelectSync(
+        GridFightInstance inst, uint ackPos, uint buffId, bool replayOnly)
+    {
         var sync = new GridFightSyncUpdateResultScNotify();
 
         var grantedEquipIds = new List<uint>();
         if (GameData.GridFightPortalBuffData.TryGetValue(buffId, out var portalBuffData))
         {
-            
             foreach (var bonusId in portalBuffData.ShowBonusIDList)
             {
                 if (GameData.GridFightEquipmentData.ContainsKey(bonusId))
@@ -144,6 +304,15 @@ public static class GridFightPendingActionProcessor
             var addItemInfo = new GridFightGameItemSyncInfo();
             foreach (var equipId in grantedEquipIds)
             {
+                var existing = inst.Equipments.FirstOrDefault(e => e.GridFightEquipmentId == equipId);
+                if (existing != null)
+                {
+                    addItemInfo.GridFightEquipmentList.Add(existing);
+                    continue;
+                }
+
+                if (replayOnly) continue;
+
                 var equip = new GridFightEquipmentInfo
                 {
                     GridFightEquipmentId = equipId,
@@ -153,8 +322,11 @@ public static class GridFightPendingActionProcessor
                 inst.Equipments.Add(equip);
                 addItemInfo.GridFightEquipmentList.Add(equip);
             }
-            sec0.UpdateDynamicList.Add(new GridFightSyncData { AddGameItemInfo = addItemInfo });
-            sync.SyncResultDataList.Add(sec0);
+            if (addItemInfo.GridFightEquipmentList.Count > 0)
+            {
+                sec0.UpdateDynamicList.Add(new GridFightSyncData { AddGameItemInfo = addItemInfo });
+                sync.SyncResultDataList.Add(sec0);
+            }
         }
 
         var sec2 = new GridFightSyncResultData { GridUpdateSrc = GridFightUpdateSrcType.LnpfefkjdhpHndkhmefaal };
@@ -170,6 +342,7 @@ public static class GridFightPendingActionProcessor
                 AddRoleInfo = new GridGameRoleInfo { Id = avatarId, Pos = pos, RoleStar = 1, UniqueId = uniqueId, GridFightValueInitComponent = { [component] = 0 } }
             });
         }
+        GridFightInstance.AppendBattlefieldLayoutSync(sec3, inst);
         sync.SyncResultDataList.Add(sec3);
 
         var sec4 = new GridFightSyncResultData();
@@ -223,22 +396,23 @@ public static class GridFightPendingActionProcessor
                 LockType = GridFightLockType.PjbmhhnlclbEhfhdgpocnh
             }
         });
-        sec6.UpdateDynamicList.Add(new GridFightSyncData { PendingAction = inst.PendingAction });
+        if (inst.PendingAction != null)
+            sec6.UpdateDynamicList.Add(new GridFightSyncData { PendingAction = inst.PendingAction });
         sync.SyncResultDataList.Add(sec6);
-        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(sync));
+
+        return sync;
     }
 
     private static async System.Threading.Tasks.Task HandleRoundBegin(Connection connection, GridFightInstance inst, uint ackPos)
     {
-        inst.RotateShop();
         var nextPos = ackPos + 1;
         var next = inst.BuildSectionEntryPending(nextPos);
         inst.QueuePosition = next.QueuePosition;
         inst.PendingAction = next;
         await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
 
-        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(connection.Player!, GridFightSyncKind.PendingAdvance, (ackPos, next.QueuePosition)));
-        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(connection.Player!, GridFightSyncKind.RefreshShop));
+        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(
+            connection.Player!, GridFightSyncKind.PendingAdvance, (ackPos, next.QueuePosition)));
     }
 
     private static GridFightSyncUpdateResultScNotify BuildEliteBranchRouteSync(GridFightInstance inst)
@@ -288,13 +462,8 @@ public static class GridFightPendingActionProcessor
         inst.QueuePosition = nextPos;
         inst.PendingAction = null;
         await connection.SendPacket(new PacketGridFightHandlePendingActionScRsp(ackPos));
-        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(connection.Player!, GridFightSyncKind.PendingAdvance, (ackPos, nextPos)));
-
-        if (GridFightLevelResolver.IsCombatNode(inst) && inst.LastEliteBranchConsumedSection != inst.SectionId)
-        {
-            var encounter = GridFightLevelResolver.Resolve(inst);
-            inst.ConfigureNextBattle(encounter.StageId, encounter.Monsters.Select(m => m.MonsterId));
-        }
+        await connection.SendPacket(new PacketGridFightSyncUpdateResultScNotify(
+            connection.Player!.GridFightManager!.BuildReturnPreparationNotify(ackPos)));
     }
 
     private static async System.Threading.Tasks.Task HandleAugmentReroll(Connection connection, GridFightInstance inst, uint ackPos, uint augmentId)
@@ -346,15 +515,18 @@ public static class GridFightPendingActionProcessor
                 grantedRoleId = pick.AvatarID;
                 grantedComponent = pick.RoleSavedValueList[0];
                 grantedRoleUniqueId = inst.AllocRoleUniqueId();
-                for (uint p = 14; p <= 18; p++)
+                if (inst.TryAllocBenchPos(out var benchPos))
                 {
-                    if (inst.UniqueIdByPos.ContainsKey(p)) continue;
-                    grantedPos = p; break;
+                    grantedPos = benchPos;
+                    inst.RoleByUniqueId[grantedRoleUniqueId] = grantedRoleId;
+                    inst.RoleStarByUniqueId[grantedRoleUniqueId] = 1;
+                    inst.UniqueIdByPos[grantedPos] = grantedRoleUniqueId;
                 }
-                if (grantedPos == 0) grantedPos = 14;
-                inst.RoleByUniqueId[grantedRoleUniqueId] = grantedRoleId;
-                inst.RoleStarByUniqueId[grantedRoleUniqueId] = 1;
-                inst.UniqueIdByPos[grantedPos] = grantedRoleUniqueId;
+                else
+                {
+                    grantedRoleId = 0;
+                    grantedRoleUniqueId = 0;
+                }
             }
         }
 
@@ -458,24 +630,34 @@ public static class GridFightPendingActionProcessor
             (grantedRoleId, grantedEquipId) = inst.CurrentSupplyOffer[pickIndex];
             grantedRoleUniqueId = inst.AllocRoleUniqueId();
             grantedEquipUniqueId = inst.AllocEquipUniqueId();
-            for (uint p = 14; p <= 18; p++)
+            if (inst.TryAllocBenchPos(out var benchPos))
             {
-                if (inst.UniqueIdByPos.ContainsKey(p)) continue;
-                grantedPos = p; break;
+                grantedPos = benchPos;
+                var avatarId = GridFightRoleLookup.ToAvatarId(grantedRoleId);
+                inst.RoleByUniqueId[grantedRoleUniqueId] = avatarId;
+                inst.RoleStarByUniqueId[grantedRoleUniqueId] = 1;
+                inst.UniqueIdByPos[grantedPos] = grantedRoleUniqueId;
+                grantedRoleId = avatarId;
+                inst.Equipments.Add(new GridFightEquipmentInfo
+                {
+                    GridFightEquipmentId = grantedEquipId,
+                    Source = 1,
+                    UniqueId = grantedEquipUniqueId
+                });
             }
-            if (grantedPos == 0) grantedPos = 14;
-            inst.RoleByUniqueId[grantedRoleUniqueId] = grantedRoleId;
-            inst.RoleStarByUniqueId[grantedRoleUniqueId] = 1;
-            inst.UniqueIdByPos[grantedPos] = grantedRoleUniqueId;
-            inst.Equipments.Add(new GridFightEquipmentInfo
+            else
             {
-                GridFightEquipmentId = grantedEquipId,
-                Source = 1,
-                UniqueId = grantedEquipUniqueId
-            });
+                grantedRoleId = 0;
+                grantedRoleUniqueId = 0;
+                grantedEquipId = 0;
+                grantedEquipUniqueId = 0;
+            }
             if (GameData.GridFightRoleBasicInfoData.TryGetValue(grantedRoleId, out var roleExcel)
                 && roleExcel.RoleSavedValueList.Count > 0)
                 grantedComponent = roleExcel.RoleSavedValueList[0];
+            else if (GridFightRoleLookup.TryFind(grantedRoleId, out var roleByAvatar)
+                     && roleByAvatar.RoleSavedValueList.Count > 0)
+                grantedComponent = roleByAvatar.RoleSavedValueList[0];
         }
 
         inst.LastSupplyConsumedSection = inst.SectionId;
@@ -511,6 +693,7 @@ public static class GridFightPendingActionProcessor
                 UniqueId = grantedEquipUniqueId
             });
             equipSec.UpdateDynamicList.Add(new GridFightSyncData { AddGameItemInfo = addItem });
+            GridFightInstance.AppendBattlefieldLayoutSync(equipSec, inst);
             sync.SyncResultDataList.Add(equipSec);
         }
         if (grantedRoleId > 0)

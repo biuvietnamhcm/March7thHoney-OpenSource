@@ -83,7 +83,7 @@ public class ServerOption
     public string DefaultNickname { get; set; } = "Trailblazer";
     public int StartTrailblazerLevel { get; set; } = 1;
     public bool AutoUpgradeWorldLevel { get; set; } = true;
-    public bool EnableMission { get; set; } = false; 
+    public bool EnableMission { get; set; } = true;
     public bool EnableQuest { get; set; } = true; 
     public bool AutoLightSection { get; set; } = true;
     public string Language { get; set; } = "EN";
@@ -102,6 +102,7 @@ public class ServerOption
     public bool UseCache { get; set; } = true;
     public bool EnableMonthCard { get; set; } = true;
     public ServerTimeOption ServerTime { get; set; } = new();
+    public DailyActivityOption DailyActivity { get; set; } = new();
     public WelcomeMailConfig WelcomeMail { get; set; } = new();
 
     public int ValidFarmingDropRate()
@@ -183,6 +184,12 @@ public class WelcomeMailItemConfig
     public int Level { get; set; } = 1;
     public int Promotion { get; set; } = 0;
     public int TalentLevel { get; set; }
+}
+
+public class DailyActivityOption
+{
+    public int UtcOffsetHours { get; set; } = 8;
+    public int ResetHour { get; set; } = 4;
 }
 
 public class ServerTimeOption

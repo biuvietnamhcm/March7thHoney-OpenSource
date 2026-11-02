@@ -40,18 +40,16 @@ public class CommandGrid : ICommand
             return;
         }
 
+        if (!inst.TryAllocBenchPos(out var pos))
+        {
+            await arg.SendMsg(I18NManager.Translate("Game.Command.Notice.InvalidArguments"));
+            return;
+        }
+
         var uniqueId = inst.AllocRoleUniqueId();
         inst.RoleByUniqueId[uniqueId] = roleId;
         inst.RoleStarByUniqueId[uniqueId] = star;
-
-        uint pos = 0;
-        foreach (var p in new uint[] { 14, 15, 16, 17, 18, 6, 7, 8, 9, 10, 11, 12, 13 })
-        {
-            if (inst.UniqueIdByPos.ContainsKey(p)) continue;
-            pos = p;
-            break;
-        }
-        if (pos > 0) inst.UniqueIdByPos[pos] = uniqueId;
+        inst.UniqueIdByPos[pos] = uniqueId;
 
         var roleInfo = new GridGameRoleInfo
         {

@@ -1,5 +1,6 @@
 using March7thHoney.GameServer.Server.Packet.Send.GridFight;
 using March7thHoney.GameServer.Game.Battle;
+using March7thHoney.GameServer.Game.GridFight;
 using March7thHoney.GameServer.Game.GridFight.Battle;
 using March7thHoney.Kcp;
 using March7thHoney.Proto;
@@ -23,9 +24,20 @@ public class HandlerGridFightEnterBattleStageCsReq : Handler
                 await connection.SendPacket(new PacketGridFightEnterBattleStageScRsp(inst, null));
                 return;
             }
+
+            EnsureBattleEncounterConfigured(inst);
             battle = inst.StartBattle();
             await connection.SendPacket(new PacketGridFightSeasonHandBookNotify(inst.BuildHandbookNotifyForBattle()));
         }
         await connection.SendPacket(new PacketGridFightEnterBattleStageScRsp(inst, battle));
+    }
+
+    private static void EnsureBattleEncounterConfigured(GridFightInstance inst)
+    {
+        if (!inst.NeedsBattleEncounterConfiguration())
+            return;
+
+        var encounter = GridFightLevelResolver.Resolve(inst);
+        inst.ConfigureNextBattle(encounter.StageId, encounter.Monsters.Select(m => m.MonsterId));
     }
 }
