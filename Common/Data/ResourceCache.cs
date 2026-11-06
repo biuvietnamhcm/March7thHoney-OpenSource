@@ -185,7 +185,7 @@ public class ResourceCache
 
         var staleEquipmentConfig = GameData.EquipmentConfigData.Values
             .Any(config => config.Release && (config.ExpProvide <= 0 || config.CoinCost <= 0));
-        if (GameData.DailyActiveConfigData.Count == 0 || GameData.DailyQuestData.Count == 0 || GameData.DailyMissionData.Count == 0)
+        if (GameData.DailyActiveConfigData.Count == 0 || GameData.DailyQuestData.Count == 0 || GameData.DailyMissionData.Count == 0 || GameData.DailyActiveQuestPoolData.Count == 0)
             return false; // Rebuild caches created before daily activity resource support.
         if (!staleEquipmentConfig) return true;
 

@@ -33,7 +33,8 @@ The project is actively developed, with regular feature updates and fixes.
 |---|---|---|
 | Shop system | Stable | Browse and purchase flow works |
 | Team formation | Stable | Lineup and slot switching available |
-| Warp/Gacha | Stable | Full pull flow and result display |
+| Warp/Gacha | In progress | Separate pity, guarantees, Departure, Celestial selection and 300-Warp reward; client UI validation pending |
+| Daily Training | In progress | Resource-based rotation, persisted progress/rewards and NPC daily objectives |
 | Battle flow | Stable | Core combat loop is playable |
 | Open-world scene | Stable | Scene loading, interaction, exploration |
 | Character progression | Stable | Leveling and promotion loops available |
@@ -45,6 +46,8 @@ The project is actively developed, with regular feature updates and fixes.
 | Achievement system | Stable | Most achievements supported |
 
 Detailed implementation progress: [Gameplay Implementation Tree](docs/GameplayImplementationTree.md) | [简中](docs/GameplayImplementationTree_zh-CN.md) | [繁中](docs/GameplayImplementationTree_zh-TW.md) | [JP](docs/GameplayImplementationTree_ja-JP.md)
+
+4.2 behavior and verification: [Daily Training (Vietnamese)](docs/DailyActivity_vi.md) | [Warp/Gacha (Vietnamese)](docs/Gacha42_vi.md).
 
 ## Muip API Entry
 

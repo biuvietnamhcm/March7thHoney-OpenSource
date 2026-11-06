@@ -117,6 +117,9 @@ public class BattleManager(PlayerInstance player) : BasePlayerManager(player)
                 GameData.AvatarConfigData.TryGetValue(castAvatar.AvatarInfo.AvatarId, out var avatarExcel);
                 if (avatarExcel != null)
                 {
+                    battleInstance.ExcellentEntry = battleInstance.Stages.Take(1).SelectMany(s => s.MonsterList.Take(1))
+                        .SelectMany(m => new[] { m.Monster0, m.Monster1, m.Monster2, m.Monster3, m.Monster4 })
+                        .Any(id => GameData.MonsterConfigData.GetValueOrDefault(id)?.StanceWeakList.Contains(avatarExcel.DamageType.ToString()) == true);
                     mazeBuff = new MazeBuff((int)avatarExcel.DamageType, 1, index);
                     mazeBuff.DynamicValues.Add("SkillIndex", isSkill ? 2 : 1);
                 }
@@ -229,6 +232,7 @@ public class BattleManager(PlayerInstance player) : BasePlayerManager(player)
             StaminaCost = cost,
             WorldLevel = config.WorldLevel,
             CocoonWave = wave,
+            CocoonId = cocoonId,
             MappingInfoId = config.MappingInfoID
         };
 

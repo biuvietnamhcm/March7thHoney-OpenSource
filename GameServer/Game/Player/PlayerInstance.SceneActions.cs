@@ -214,7 +214,11 @@ public partial class PlayerInstance
             }
 
         
-        if (MissionManager != null) await MissionManager.OnPlayerInteractWithProp();
+        if (MissionManager != null)
+        {
+            await MissionManager.OnPlayerInteractWithProp();
+            await MissionManager.OnMissionPropInteracted(prop.Scene.FloorId, prop.GroupId, prop.PropInfo.ID);
+        }
 
         
         InventoryManager!.HandlePlaneEvent(prop.PropInfo.EventID);

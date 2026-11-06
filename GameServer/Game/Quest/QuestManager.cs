@@ -144,7 +144,8 @@ public class QuestManager(PlayerInstance player) : BasePlayerManager(player)
 
     public async ValueTask<Retcode> FinishQuestByClient(int questId)
     {
-        if (Player.DailyActivityManager?.IsDailyQuest(questId) == true) return Retcode.RetQuestStatusError;
+        if (Player.DailyActivityManager?.IsDailyQuest(questId) == true)
+            return await Player.DailyActivityManager.ReportClientObjective(questId);
         if (!ConfigManager.Config.ServerOption.EnableQuest) return Retcode.RetSucc;
 
         GameData.QuestDataData.TryGetValue(questId, out var questExcel);

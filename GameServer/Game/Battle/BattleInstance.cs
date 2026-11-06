@@ -67,6 +67,8 @@ public class BattleInstance(PlayerInstance player, LineupInfo lineup, List<Stage
     public int StaminaCost { get; set; }
     public int WorldLevel { get; set; }
     public int CocoonWave { get; set; }
+    public int CocoonId { get; set; }
+    public bool ExcellentEntry { get; set; }
     public int MappingInfoId { get; set; }
     public int RoundLimit { get; set; }
     public int StageId { get; set; } = stages.Count > 0 ? stages[0].StageID : 0; 

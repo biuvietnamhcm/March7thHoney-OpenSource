@@ -34,17 +34,26 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
 
     private readonly SemaphoreSlim _itemHandIn = new(1, 1);
 
-    public async ValueTask<Retcode> ConsumeMissionItems(int missionId)
+    public async ValueTask<Retcode> ConsumeMissionItems(int missionId, List<ItemData>? selectedItems = null)
     {
         await _itemHandIn.WaitAsync();
         try
         {
             if (Player.DailyActivityManager != null) await Player.DailyActivityManager.RefreshAsync();
             var mission = GetSubMissionInfo(missionId);
-            if (mission?.FinishType != MissionFinishTypeEnum.ConsumeMissionItem ||
+            if (mission == null || mission.FinishType is not (MissionFinishTypeEnum.ConsumeMissionItem or MissionFinishTypeEnum.UseSelectedItem) ||
                 GetSubMissionStatus(missionId) != MissionPhaseEnum.Accept) return Retcode.RetMissionNotDoing;
             var costs = (mission.ParamItemList ?? []).GroupBy(x => x.ItemID)
                 .Select(x => new ItemData { ItemId = x.Key, Count = x.Sum(y => y.ItemNum) }).ToList();
+            if (mission.FinishType == MissionFinishTypeEnum.UseSelectedItem)
+            {
+                // ParamInt1 is the number of selection slots. Only the supplied alternatives may be consumed.
+                if (selectedItems == null || selectedItems.Count != Math.Max(1, mission.ParamInt1) ||
+                    selectedItems.Select(x => x.ItemId).Distinct().Count() != selectedItems.Count ||
+                    selectedItems.Any(x => !costs.Any(c => c.ItemId == x.ItemId && c.Count == x.Count)))
+                    return Retcode.RetMissionNotDoing;
+                costs = selectedItems;
+            }
             if (costs.Count == 0 || Player.InventoryManager == null ||
                 costs.Any(x => x.Count <= 0 || (Player.InventoryManager.GetItem(x.ItemId)?.Count ?? 0) < x.Count))
                 return Retcode.RetItemNotEnough;
@@ -684,6 +693,24 @@ public class MissionManager(PlayerInstance player) : BasePlayerManager(player)
                 FinishTypeHandlers.TryGetValue(MissionFinishTypeEnum.PropState, out var handler);
                 if (handler != null) await handler.HandleMissionFinishType(Player, GetSubMissionInfo(id)!, null);
             }
+    }
+
+    public async ValueTask OnMissionPropInteracted(int floorId, int groupId, int propId)
+    {
+        if (Player.DailyActivityManager != null) await Player.DailyActivityManager.RefreshAsync();
+        foreach (var mission in GetRunningSubMissionList().ToList())
+        {
+            if (mission.FinishType != MissionFinishTypeEnum.InteractPropList ||
+                mission.LevelFloorID != floorId || mission.ParamInt1 != groupId ||
+                mission.ParamIntList?.Contains(propId) != true) continue;
+            if (!Data.InteractedMissionProps.TryGetValue(mission.ID, out var seen))
+                Data.InteractedMissionProps[mission.ID] = seen = [];
+            if (seen.Contains(propId)) continue;
+            seen.Add(propId);
+            await SetMissionProgress(mission.ID, seen.Count);
+            if (seen.Count >= Math.Max(1, mission.Progress)) await FinishSubMission(mission.ID);
+            DatabaseHelper.Instance?.SaveUidData(Player.Uid);
+        }
     }
 
     public async ValueTask OnPlayerChangeScene()

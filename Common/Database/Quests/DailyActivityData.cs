@@ -11,6 +11,7 @@ public class DailyActivityData : BaseDatabaseDataHelper
     public int AssignmentLevel { get; set; }
     public int NpcMissionId { get; set; }
     public bool NpcCompleted { get; set; }
+    public bool BoardAssigned { get; set; }
     [SugarColumn(IsJson = true)] public List<int> QuestIds { get; set; } = [];
     [SugarColumn(IsJson = true)] public List<int> ClaimedLevels { get; set; } = [];
 }

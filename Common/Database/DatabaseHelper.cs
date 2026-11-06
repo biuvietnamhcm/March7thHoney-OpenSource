@@ -25,6 +25,21 @@ public class DatabaseHelper
         Instance = this;
     }
 
+    public static ConfigureExternalServices CreateExternalServices(DbType type) => new()
+    {
+        SerializeService = new CustomSerializeService(),
+        EntityService = (_, column) =>
+        {
+            // JSON collections (including complete warp history) outgrow VARCHAR/TEXT.
+            // Keep MySQL rows small and avoid truncating serialized player state.
+            if (type == DbType.MySql && column.IsJson)
+            {
+                column.DataType = "longtext";
+                column.Length = 0;
+            }
+        }
+    };
+
     public void Initialize()
     {
         logger.Info(I18NManager.Translate("Server.ServerInfo.LoadingItem", I18NManager.Translate("Word.Database")));
@@ -53,10 +68,7 @@ public class DatabaseHelper
             ConnectionString = connectionString,
             DbType = type,
             IsAutoCloseConnection = true,
-            ConfigureExternalServices = new ConfigureExternalServices
-            {
-                SerializeService = new CustomSerializeService()
-            }
+            ConfigureExternalServices = CreateExternalServices(type)
         });
 
         switch (config.Database.DatabaseType)
@@ -212,9 +224,9 @@ public class DatabaseHelper
         {
             sqlSugarScope?.CodeFirst.InitTables<T>();
         }
-        catch
+        catch (Exception e)
         {
-            
+            throw new InvalidOperationException($"Cannot initialize database table for {typeof(T).FullName}.", e);
         }
     }
 

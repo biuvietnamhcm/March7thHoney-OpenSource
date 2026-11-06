@@ -151,6 +151,8 @@ public class SceneSkillManager(PlayerInstance player) : BasePlayerManager(player
 
             
             await Player.SceneInstance.RemoveEntity(prop, false);
+            if (Player.DailyActivityManager != null)
+                await Player.DailyActivityManager.RecordEvent(March7thHoney.Enums.Mission.MissionFinishTypeEnum.PropDestruct);
             await Player.SendPacket(new PacketSceneGroupRefreshScNotify(
                 Player,
                 null,

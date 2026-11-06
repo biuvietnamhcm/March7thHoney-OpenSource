@@ -7,6 +7,7 @@ namespace March7thHoney.Database.Quests;
 [SugarTable("Mission")]
 public class MissionData : BaseDatabaseDataHelper
 {
+    [SugarColumn(IsJson = true)] public Dictionary<int, List<int>> InteractedMissionProps { get; set; } = [];
     [SugarColumn(IsJson = true, ColumnDataType = "TEXT")]
     public Dictionary<int, Dictionary<int, MissionInfo>> MissionInfo { get; set; } =
         []; 

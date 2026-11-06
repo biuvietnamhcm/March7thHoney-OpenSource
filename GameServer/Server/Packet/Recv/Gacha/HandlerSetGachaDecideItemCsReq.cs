@@ -11,9 +11,8 @@ public class HandlerSetGachaDecideItemCsReq : Handler
     {
         var req = SetGachaDecideItemCsReq.Parser.ParseFrom(data);
 
-        connection.Player!.GachaManager!.GachaData.GachaDecideOrder = req.DGOMHDMJHEK.Select(x => (int)x).ToList();
-
-        await connection.SendPacket(new PacketSetGachaDecideItemScRsp(req.GachaId, req.DGOMHDMJHEK.ToList()));
+        var result = await connection.Player!.GachaManager!.SetDecideItems((int)req.GachaId, req.DGOMHDMJHEK.Select(x => (int)x).ToList());
+        await connection.SendPacket(new PacketSetGachaDecideItemScRsp(req.GachaId, req.DGOMHDMJHEK.ToList(), result));
     }
 }
 

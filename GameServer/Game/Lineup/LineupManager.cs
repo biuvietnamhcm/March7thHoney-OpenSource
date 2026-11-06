@@ -407,10 +407,13 @@ public class LineupManager : BasePlayerManager
     public async ValueTask CostMp(int count, uint castEntityId = 1)
     {
         var curLineup = GetCurLineup()!;
-        curLineup.Mp -= count;
+        var spent = Math.Min(Math.Max(count, 0), curLineup.Mp);
+        curLineup.Mp -= spent;
         curLineup.Mp = Math.Min(Math.Max(0, curLineup.Mp), GetMaxMp());
 
         await Player.SendPacket(new PacketSceneCastSkillMpUpdateScNotify(castEntityId, curLineup.Mp));
+        if (spent > 0 && Player.DailyActivityManager != null)
+            await Player.DailyActivityManager.RecordEvent(March7thHoney.Enums.Mission.MissionFinishTypeEnum.UseMazeSkill);
     }
 
     public async ValueTask GainMp(int count, bool sendPacket = true,

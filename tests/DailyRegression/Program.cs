@@ -30,6 +30,8 @@ void Load<T>(string name) where T : ExcelResource
         row.Loaded();
 }
 Load<DailyActiveConfigExcel>("DailyActiveConfig"); Load<DailyQuestExcel>("DailyQuest");
+Load<DailyActiveQuestPoolExcel>("DailyActiveQuestPool");
+Load<CocoonConfigExcel>("CocoonConfig");
 Load<DailyMissionExcel>("DailyMissionData"); Load<QuestDataExcel>("QuestData");
 Load<FinishWayExcel>("FinishWay"); Load<RewardDataExcel>("RewardData"); Load<ItemConfigExcel>("ItemConfig");
 // One real NPC daily graph keeps this test focused and deterministic.
@@ -39,14 +41,24 @@ GameData.MainMissionData[npc.MainMissionID] = npc;
 ResourceManager.LoadMissionInfo();
 MissionManager.FinishTypeHandlers[MissionFinishTypeEnum.SubMissionFinishCnt] = new MissionHandlerSubMissionFinishCnt();
 var path = Path.Combine(Path.GetTempPath(), $"march7th-daily-{Guid.NewGuid():N}.sqlite");
+var mysqlConnection = Environment.GetEnvironmentVariable("MARCH7TH_TEST_MYSQL_CONNECTION");
+if (mysqlConnection != null)
+{
+    var connection = new System.Data.Common.DbConnectionStringBuilder { ConnectionString = mysqlConnection };
+    if (!connection.TryGetValue("Database", out var schema) || !schema.ToString()!.StartsWith("march7th_test_", StringComparison.Ordinal))
+        throw new InvalidOperationException("MySQL regression requires a dedicated march7th_test_ database.");
+}
 using var db = new SqlSugarScope(new ConnectionConfig
 {
-    ConnectionString = $"Data Source={path};", DbType = DbType.Sqlite, IsAutoCloseConnection = true,
-    ConfigureExternalServices = new() { SerializeService = new CustomSerializeService() }
+    ConnectionString = mysqlConnection ?? $"Data Source={path};", DbType = mysqlConnection == null ? DbType.Sqlite : DbType.MySql, IsAutoCloseConnection = true,
+    ConfigureExternalServices = DatabaseHelper.CreateExternalServices(mysqlConnection == null ? DbType.Sqlite : DbType.MySql)
 });
 DatabaseHelper.sqlSugarScope = db; _ = new DatabaseHelper();
 foreach (var type in typeof(PlayerData).Assembly.GetTypes().Where(t => t.IsSubclassOf(typeof(BaseDatabaseDataHelper))))
-    db.CodeFirst.InitTables(type);
+    {
+    try { db.CodeFirst.InitTables(type); }
+    catch (Exception e) { throw new InvalidOperationException($"Schema initialization failed: {type.FullName}", e); }
+}
 var tests = new (string, Func<Task>)[]
 {
     ("Resource tiers cover world levels 0-6 and both daily reward opcodes exist", Resources),
@@ -56,7 +68,7 @@ var tests = new (string, Func<Task>)[]
     ("Milestones reject early/invalid/duplicate claims, including concurrent requests", Milestones),
     ("Claim all grants only unclaimed eligible levels with actual world rewards", ClaimAll),
     ("Missing reward config preserves the claim for retry", MissingReward),
-    ("SQLite reload preserves points, partial progress, claims and NPC selection", Reload),
+    ("Database reload preserves points, partial progress, claims and NPC selection", Reload),
     ("4 AM UTC+8 boundary resets daily state without clearing story/achievements", Reset),
     ("Real NPC dialogue completion grants the daily objective only once", NpcDaily),
     ("Battle objectives accumulate across wins; loss and duplicate callbacks do not count", Battles),
@@ -64,7 +76,12 @@ var tests = new (string, Func<Task>)[]
     ("Low-level board uses valid variants and changes bracket only on next reset", LowLevels),
     ("Crafting requires real materials before granting daily progress", Crafting),
     ("NPC item hand-in validates active objective and available items", HandIn),
-    ("Legacy NPC completion can be assigned afresh; disabled quests cannot pay rewards", Legacy)
+    ("Legacy NPC completion can be assigned afresh; disabled quests cannot pay rewards", Legacy),
+    ("Modern board rotates by group and remains fixed across reconnect/unlocks", Rotation),
+    ("Calyx and cavern progress require a real matching battle victory", FarmBattles),
+    ("Photography client report cannot complete server-owned objectives", Photograph),
+    ("Real InteractPropList checks floor, group, prop and repeat interactions", PropMission),
+    ("Real UseSelectedItem validates alternatives, slot count and exact consumption", SelectedItem)
 };
 var failures = 0;
 foreach (var (name, run) in tests)
@@ -72,7 +89,7 @@ foreach (var (name, run) in tests)
     try { await run(); Console.WriteLine($"PASS {name}"); }
     catch (Exception e) { failures++; Console.Error.WriteLine($"FAIL {name}: {e}"); }
 }
-Console.WriteLine($"{tests.Length - failures}/{tests.Length} scenarios passed. Isolated database: {path}");
+Console.WriteLine($"{tests.Length - failures}/{tests.Length} scenarios passed. Isolated database: {(mysqlConnection == null ? path : "MySQL test schema")}");
 return failures == 0 ? 0 : 1;
 
 static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
@@ -103,7 +120,8 @@ static async Task Earn500(PlayerInstance p)
     await Claim(p, 2100132);
     await p.DailyActivityManager.RecordProgress(2100133, 1); await Claim(p, 2100133);
     await p.SpendStamina(120); await Claim(p, 2100139);
-    await p.DailyActivityManager.RecordProgress(2100155, 1); await Claim(p, 2100155);
+    var extra = p.DailyActivityManager.Data.QuestIds.First(id => id != 2100132 && id != 2100133 && id != 2100139 && id != 2100003 && id != 2100156);
+    await p.DailyActivityManager.RecordProgress(extra, 999); await Claim(p, extra);
     Check(p.DailyActivityManager.Data.Points == 500, "Did not reach 500");
 }
 static Task Resources()
@@ -183,7 +201,7 @@ static async Task Reload()
     DatabaseHelper.UidInstanceMap.TryRemove(p.Uid, out _); p = Player(3007, clock);
     await p.DailyActivityManager!.RefreshAsync();
     Check(p.Data.Hcoin == hcoin && p.DailyActivityManager.Data.Points == 100 && p.QuestManager!.GetQuestProgress(2100139) == 40 &&
-        p.DailyActivityManager.Data.NpcMissionId == npcId, "Daily state lost after SQLite reload");
+        p.DailyActivityManager.Data.NpcMissionId == npcId, "Daily state lost after Database reload");
     Check((await p.DailyActivityManager.TakeRewards(1)).Code != Retcode.RetSucc, "Reload duplicated reward");
 }
 static async Task Reset()
@@ -237,11 +255,14 @@ static async Task LowLevels()
 {
     var clock = new TestClock(); var p = Player(3012, clock, level: 35);
     await p.DailyActivityManager!.RefreshAsync();
-    Check(p.DailyActivityManager.IsAssigned(2100141) && p.DailyActivityManager.IsAssigned(2100145) &&
-        p.DailyActivityManager.IsAssigned(2100148) && !p.DailyActivityManager.IsAssigned(2100139), "Wrong low-level variants");
-    Check(p.DailyActivityManager.Data.QuestIds.All(id => !GameData.DailyQuestData[id].IsDelete), "Deleted quest assigned");
-    await p.DailyActivityManager.OnItemComposed(1);
-    Check(p.QuestManager!.GetQuestStatus(2100148) == QuestStatus.QuestFinish, "Low-level crafting not wired");
+    var ids = p.DailyActivityManager.Data.QuestIds.ToArray();
+    var types = ids.Select(id => GameData.DailyActiveQuestPoolData[id].Type).ToArray();
+    Check(types.Contains(11) && types.Contains(12) && types.Contains(13) && !types.Contains(14), "Wrong low-level groups");
+    Check(types.Distinct().Count() == types.Length && ids.All(id => !GameData.DailyQuestData[id].IsDelete), "Duplicate group/deleted quest assigned");
+    var objective = ids.Single(id => GameData.DailyActiveQuestPoolData[id].Type == 13);
+    var finish = GameData.FinishWayData[GameData.QuestDataData[objective].FinishWayID];
+    await p.DailyActivityManager.RecordEvent(finish.FinishType, 1);
+    Check(p.QuestManager!.GetQuestStatus(objective) == QuestStatus.QuestFinish, "Low-level event not wired");
     p.Data.Level = 36; await p.DailyActivityManager.RefreshAsync();
     Check(!p.DailyActivityManager.IsAssigned(2100155), "Level-up duplicated daily objectives");
     clock.Now += 86400; await p.DailyActivityManager.RefreshAsync();
@@ -290,5 +311,96 @@ static async Task Legacy()
     ConfigManager.Config.ServerOption.EnableQuest = false;
     try { Check((await p.DailyActivityManager.TakeRewards(1)).Code != Retcode.RetSucc, "Disabled daily paid rewards"); }
     finally { ConfigManager.Config.ServerOption.EnableQuest = true; }
+}
+static async Task Rotation()
+{
+    var clock = new TestClock(); var p = Player(3020, clock, level: 35);
+    foreach (var id in new[] { 4010121, 4010123, 4010125, 4010127, 1000202 }) p.MissionManager!.Data.SetMainMissionStatus(id, MissionPhaseEnum.Finish);
+    var boards = new HashSet<string>();
+    for (var day = 0; day < 8; day++)
+    {
+        await p.DailyActivityManager!.RefreshAsync();
+        var ids = p.DailyActivityManager.Data.QuestIds.ToArray();
+        Check(ids.Select(id => GameData.DailyActiveQuestPoolData[id].Type).Distinct().Count() == ids.Length, "Multiple objectives per group");
+        Check(ids.Contains(2100156) && !ids.Contains(2100150) && ids.All(id => GameData.DailyActiveQuestPoolData[id].Type is 1 or >= 6), "Legacy/obsolete alternatives leaked");
+        boards.Add(string.Join(',', ids));
+        DatabaseHelper.UidInstanceMap.TryRemove(p.Uid, out _); p = Player(3020, clock, level: 35);
+        await p.DailyActivityManager.RefreshAsync();
+        Check(p.DailyActivityManager.Data.QuestIds.SequenceEqual(ids), "Relog rerolled board");
+        clock.Now += 86400;
+    }
+    Check(boards.Count > 1, "Board never rotates");
+}
+static async Task FarmBattles()
+{
+    foreach (var (uid, unlock, quest, validCocoon, invalidCocoon) in new[]
+    {
+        (3021, 4010125, 2100137, 1201, 1001),
+        (3025, 4010121, 2100157, 1001, 1004),
+        (3026, 4010123, 2100158, 1004, 1001),
+        (3027, 4010127, 2100138, 0, 1001)
+    })
+    {
+        var p = Player(uid, new(), level: 35);
+        p.MissionManager!.Data.SetMainMissionStatus(unlock, MissionPhaseEnum.Finish);
+        await p.DailyActivityManager!.RefreshAsync();
+        Check(p.DailyActivityManager.IsAssigned(quest), $"Farm objective {quest} missing");
+        BattleInstance Battle(int id, BattleEndStatus status) => new(p, new March7thHoney.Database.Lineup.LineupInfo(), new List<StageConfigExcel>())
+            { CocoonId = id, CocoonWave = 1, MappingInfoId = id == 0 ? 1 : 0, WorldLevel = 2, BattleResult = new() { EndStatus = status } };
+        await p.DailyActivityManager.OnBattleFinished(Battle(validCocoon, BattleEndStatus.BattleEndLose));
+        await p.DailyActivityManager.OnBattleFinished(Battle(invalidCocoon, BattleEndStatus.BattleEndWin));
+        Check(p.QuestManager!.GetQuestProgress(quest) == 0, "Wrong farm/loss credited");
+        await p.DailyActivityManager.OnBattleFinished(Battle(validCocoon, BattleEndStatus.BattleEndWin));
+        Check(p.QuestManager.GetQuestStatus(quest) == QuestStatus.QuestFinish, $"Farm win did not credit {quest}");
+    }
+}
+static async Task Photograph()
+{
+    var clock = new TestClock(); var p = Player(3022, clock, level: 35);
+    for (var i = 0; i < 8; i++)
+    {
+        await p.DailyActivityManager!.RefreshAsync();
+        if (p.DailyActivityManager.IsAssigned(2100149)) break;
+        clock.Now += 86400;
+    }
+    Check(p.DailyActivityManager!.IsAssigned(2100149), "Photo never selected");
+    Check(await p.QuestManager!.FinishQuestByClient(2100149) == Retcode.RetSucc && p.QuestManager.GetQuestStatus(2100149) == QuestStatus.QuestFinish, "Photo report rejected");
+    Check(await p.QuestManager.FinishQuestByClient(2100003) != Retcode.RetSucc, "Client completed NPC mission");
+}
+static void LoadNpc(int id)
+{
+    var root = ConfigManager.Config.Path.ResourcePath;
+    var npc = JsonConvert.DeserializeObject<List<MainMissionExcel>>(File.ReadAllText(Path.Combine(root, "ExcelOutput/MainMission.json")))!.Single(x => x.MainMissionID == id);
+    GameData.MainMissionData[id] = npc;
+    ResourceManager.LoadMissionInfo();
+}
+static async Task PropMission()
+{
+    LoadNpc(3011601);
+    var p = Player(3023, new()); await p.DailyActivityManager!.RefreshAsync();
+    await p.MissionManager!.AcceptMainMission(3011601);
+    await p.MissionManager.OnMissionPropInteracted(20111002, 75, 300001);
+    await p.MissionManager.OnMissionPropInteracted(20111001, 76, 300001);
+    await p.MissionManager.OnMissionPropInteracted(20111001, 75, 300002);
+    Check(p.MissionManager.GetSubMissionStatus(301160101) == MissionPhaseEnum.Accept, "Wrong prop completed mission");
+    await p.MissionManager.OnMissionPropInteracted(20111001, 75, 300001);
+    Check(p.MissionManager.GetSubMissionStatus(301160101) == MissionPhaseEnum.Finish, "Actual prop did not complete objective");
+    var coins = p.Data.Scoin; await p.MissionManager.OnMissionPropInteracted(20111001, 75, 300001);
+    Check(p.Data.Scoin == coins && p.MissionManager.Data.InteractedMissionProps[301160101].Count == 1, "Repeated interaction credited twice");
+}
+static async Task SelectedItem()
+{
+    LoadNpc(3011605);
+    var p = Player(3024, new()); await p.DailyActivityManager!.RefreshAsync();
+    await p.MissionManager!.AcceptMainMission(3011605);
+    Check(await p.MissionManager.ConsumeMissionItems(301160501) != Retcode.RetSucc, "Missing selection accepted");
+    Check(await p.MissionManager.ConsumeMissionItems(301160501, [new() { ItemId = 401004, Count = 1 }]) == Retcode.RetItemNotEnough, "Missing item accepted");
+    await p.InventoryManager!.AddItem(401004, 2, false); await p.InventoryManager.AddItem(401012, 1, false);
+    Check(await p.MissionManager.ConsumeMissionItems(301160501, [new() { ItemId = 401004, Count = -1 }]) != Retcode.RetSucc, "Negative count accepted");
+    Check(await p.MissionManager.ConsumeMissionItems(301160501, [new() { ItemId = 401004, Count = 1 }, new() { ItemId = 401012, Count = 1 }]) != Retcode.RetSucc, "Extra slots consumed");
+    Check(await p.MissionManager.ConsumeMissionItems(301160501, [new() { ItemId = 401004, Count = 1 }]) == Retcode.RetSucc, "Valid selection rejected");
+    Check(p.InventoryManager.GetItem(401004)?.Count == 1 && p.InventoryManager.GetItem(401012)?.Count == 1 &&
+        p.MissionManager.GetSubMissionStatus(301160501) == MissionPhaseEnum.Finish, "Wrong selected consumption");
+    Check(await p.MissionManager.ConsumeMissionItems(301160501, [new() { ItemId = 401004, Count = 1 }]) != Retcode.RetSucc, "Repeated selection accepted");
 }
 sealed class TestClock { public long Now = DateTimeOffset.Parse("2026-11-01T12:00:00Z").ToUnixTimeSeconds(); }

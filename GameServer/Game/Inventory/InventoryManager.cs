@@ -1015,8 +1015,11 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
             }
         } while (exp > 0 && nextLevelExp > 0 && curLevel < maxLevel);
 
+        var gainedLevel = curLevel > avatarData.Level;
         avatarData.Level = curLevel;
         avatarData.Exp = curExp;
+        if (gainedLevel && Player.DailyActivityManager != null)
+            await Player.DailyActivityManager.RecordEvent(MissionFinishTypeEnum.AnyAvatarLevelUp);
         
         Dictionary<int, ItemData> list = [];
         var leftover = exp;
@@ -1156,8 +1159,11 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
             }
         } while (exp > 0 && nextLevelExp > 0 && curLevel < maxLevel);
 
+        var gainedLevel = curLevel > itemData.Level;
         itemData.Level = curLevel;
         itemData.Exp = curExp;
+        if (gainedLevel && Player.DailyActivityManager != null)
+            await Player.DailyActivityManager.RecordEvent(MissionFinishTypeEnum.AnyEquipmentLevelUp);
         DatabaseHelper.ToSaveUidList.Add(Player.Uid);
         
         Dictionary<int, ItemData> list = [];
@@ -1256,6 +1262,7 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
         var relicItem = Data.RelicItems.Find(x => x.UniqueId == uniqueId);
         if (relicItem == null) return [];
 
+        var oldLevel = relicItem.Level;
         var exp = 0;
         var money = 0;
         foreach (var cost in costData.ItemList)
@@ -1330,6 +1337,8 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
                 }
             }
         } while (exp > 0 && relicType?.Exp > 0 && relicItem.Level < relicExcel.MaxLevel);
+        if (relicItem.Level > oldLevel && Player.DailyActivityManager != null)
+            await Player.DailyActivityManager.RecordEvent(MissionFinishTypeEnum.AnyRelicLevelUp);
 
         
         Dictionary<int, ItemData> list = [];

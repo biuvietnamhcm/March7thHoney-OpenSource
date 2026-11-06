@@ -20,9 +20,26 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
     private readonly Func<long> _clock = clock ?? ServerTimeProvider.GetServerUnixSec;
     private readonly SemaphoreSlim _claims = new(1, 1);
     private readonly HashSet<BattleInstance> _creditedBattles = [];
-    // Modern training board already used by this server, plus the NPC daily objective.
-    public static readonly int[] TrainingQuestIds = [2100132, 2100133, 2100003, 2100139,
-        2100141, 2100145, 2100148, 2100152, 2100153, 2100155, 2100156];
+    // 4.2 modern pools (6..17) supersede legacy training pools (2..5).
+    // One objective per pool; the highest-ID Rogue alternative replaces its older variant.
+
+    private IEnumerable<int> SelectTrainingQuests()
+    {
+        var groups = GameData.DailyActiveQuestPoolData.Values.Where(x => x.Type == 1 || x.Type >= 6)
+            .Where(x => GameData.DailyQuestData.TryGetValue(x.QuestID, out var daily) && !daily.IsDelete &&
+                Data.AssignmentLevel >= daily.MinLevel && Data.AssignmentLevel <= daily.MaxLevel &&
+                GameData.QuestDataData.TryGetValue(x.QuestID, out var quest) && IsUnlocked(quest) &&
+                GameData.FinishWayData.ContainsKey(quest.FinishWayID) &&
+                (x.Type != 1 || ConfigManager.Config.ServerOption.EnableMission))
+            .GroupBy(x => x.Type).OrderBy(x => x.Key);
+        foreach (var group in groups)
+        {
+            var candidates = group.OrderBy(x => x.QuestID).ToList();
+            var index = group.Key == 9 ? candidates.Count - 1 :
+                (int)((Data.Day + (long)Player.Uid * 31 + group.Key * 17L) % candidates.Count);
+            yield return candidates[index].QuestID;
+        }
+    }
 
     public static long GetDay(long unixSeconds)
     {
@@ -50,6 +67,7 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
         {
             Player.MissionManager.Data.SetSubMissionStatus(id, MissionPhaseEnum.None);
             Player.MissionManager.Data.SubMissionProgressDict.Remove(id);
+            Player.MissionManager.Data.InteractedMissionProps.Remove(id);
         }
     }
 
@@ -57,7 +75,7 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
     {
         if (Player.QuestManager == null || !ConfigManager.Config.ServerOption.EnableQuest) return;
         // Refuse to consume today's reset when required resources are unavailable.
-        if (GameData.DailyActiveConfigData.Count == 0 || GameData.DailyQuestData.Count == 0) return;
+        if (GameData.DailyActiveConfigData.Count == 0 || GameData.DailyQuestData.Count == 0 || GameData.DailyActiveQuestPoolData.Count == 0) return;
         var day = GetDay(_clock());
         var changed = false;
         if (day > Data.Day)
@@ -71,7 +89,7 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
             Data.RewardWorldLevel = Player.Data.WorldLevel;
             Data.AssignmentLevel = Player.Data.Level;
             Data.QuestIds.Clear(); Data.ClaimedLevels.Clear();
-            Data.NpcMissionId = 0; Data.NpcCompleted = false;
+            Data.NpcMissionId = 0; Data.NpcCompleted = false; Data.BoardAssigned = false;
             _creditedBattles.Clear(); changed = true;
         }
         if (Data.QuestIds.Count == 0)
@@ -79,7 +97,9 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
             Data.AssignmentLevel = Player.Data.Level;
             Data.RewardWorldLevel = Player.Data.WorldLevel;
         }
-        foreach (var id in TrainingQuestIds)
+        // Existing boards survive an upgrade until their next daily reset.
+        var selection = Data.BoardAssigned || Data.QuestIds.Count > 0 ? Array.Empty<int>() : SelectTrainingQuests().ToArray();
+        foreach (var id in selection)
         {
             if (id == 2100003 && !ConfigManager.Config.ServerOption.EnableMission) continue;
             if (Data.QuestIds.Contains(id) || !GameData.DailyQuestData.TryGetValue(id, out var daily) ||
@@ -87,14 +107,15 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
                 !GameData.QuestDataData.TryGetValue(id, out var quest) || !IsUnlocked(quest) ||
                 !GameData.FinishWayData.TryGetValue(quest.FinishWayID, out var finish)) continue;
             Data.QuestIds.Add(id);
-            // Login is a server event. Other daily objectives cannot be completed by FinishQuestCsReq.
+            // Login finishes on assignment; other objectives wait for their matching events.
             Player.QuestManager.QuestData.Quests[id] = new QuestInfo
             {
-                QuestId = id, QuestStatus = id == 2100132 ? QuestStatus.QuestFinish : QuestStatus.QuestDoing,
-                Progress = id == 2100132 ? finish.Progress : 0, FinishTime = id == 2100132 ? _clock() : 0
+                QuestId = id, QuestStatus = finish.FinishType == MissionFinishTypeEnum.AutoFinish ? QuestStatus.QuestFinish : QuestStatus.QuestDoing,
+                Progress = finish.FinishType == MissionFinishTypeEnum.AutoFinish ? finish.Progress : 0, FinishTime = finish.FinishType == MissionFinishTypeEnum.AutoFinish ? _clock() : 0
             };
             changed = true;
         }
+        if (Data.QuestIds.Count > 0 && !Data.BoardAssigned) { Data.BoardAssigned = true; changed = true; }
         if (Data.NpcMissionId == 0 && IsAssigned(2100003) && ConfigManager.Config.ServerOption.EnableMission)
         {
             var eligible = GameData.DailyMissionData.Values.Where(x => x.DailyMissionType == 1 &&
@@ -104,7 +125,8 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
                 main.MissionInfo.SubMissionList.All(s => s.FinishType is MissionFinishTypeEnum.Talk
                     or MissionFinishTypeEnum.SubMissionFinishCnt or MissionFinishTypeEnum.ConsumeMissionItem
                     or MissionFinishTypeEnum.StageWin or MissionFinishTypeEnum.KillMonster
-                    or MissionFinishTypeEnum.MessageSectionFinish or MissionFinishTypeEnum.EnterFloor))
+                    or MissionFinishTypeEnum.MessageSectionFinish or MissionFinishTypeEnum.EnterFloor
+                    or MissionFinishTypeEnum.InteractPropList or MissionFinishTypeEnum.UseSelectedItem))
                 .OrderBy(x => x.ID).ToList();
             if (eligible.Count > 0)
             {
@@ -177,26 +199,57 @@ public class DailyActivityManager(PlayerInstance player, Func<long>? clock = nul
         await RefreshAsync();
         if (battle.BattleResult?.EndStatus != BattleEndStatus.BattleEndWin || !_creditedBattles.Add(battle)) return;
         if (battle.Lineup.BaseAvatars?.Any(x => x.AssistUid > 0) == true)
+            await RecordEvent(MissionFinishTypeEnum.WinBattleWithAssistAvatarCnt);
+        if (battle.ExcellentEntry) await RecordEvent(MissionFinishTypeEnum.ExcellentEnterBattleAndWin);
+        foreach (var id in Data.QuestIds.ToArray())
         {
-            await RecordProgress(2100145, 1);
-            await RecordProgress(2100153, 1);
-        }
-        foreach (var id in new[] { 2100141, 2100152 })
-        {
-            var config = GameData.QuestDataData.GetValueOrDefault(id);
-            var finish = GameData.FinishWayData.GetValueOrDefault(config?.FinishWayID ?? 0);
-            if (finish == null || battle.BattleResult.Stt == null) continue;
+            var finish = FinishWay(id);
+            if (finish?.FinishType != MissionFinishTypeEnum.BattleChallenge || battle.BattleResult.Stt == null) continue;
             var progress = battle.BattleResult.Stt.BattleTargetInfo.Values.SelectMany(x => x.BattleTargetList_)
                 .Where(x => finish.ParamIntList.Contains((int)x.Id)).Sum(x => (long)x.Progress);
-            await RecordProgress(id, (int)Math.Min(progress, int.MaxValue));
+            await RecordProgress(id, (int)Math.Min(Math.Max(progress, 0), int.MaxValue));
+        }
+        if (battle.CocoonId > 0 && GameData.CocoonConfigData.TryGetValue(battle.CocoonId * 100 + battle.WorldLevel, out var cocoon))
+        {
+            var type = cocoon.CocoonType switch { "TYPE_WEEK" => 2, "TYPE_RELIC" => 3, _ => 1 };
+            await RecordEvent(MissionFinishTypeEnum.AnyCocoonFinish, 1, type);
+            await RecordEvent(MissionFinishTypeEnum.CocoonFinish, 1, cocoon.ID);
+            var farm = cocoon.FarmType switch { "COCOON_AVATAR_EXP" => 6, "COCOON_EQUIPMENT_EXP" => 7,
+                "COCOON_COIN" => 8, "COCOON3" => 5, _ => 0 };
+            if (farm > 0) await RecordEvent(MissionFinishTypeEnum.FarmTypeCocoonFinish, 1, farm);
+        }
+        else if (battle.MappingInfoId > 0 && battle.CocoonWave > 0)
+            await RecordEvent(MissionFinishTypeEnum.AnyFarmElementFinish);
+    }
+
+    private FinishWayExcel? FinishWay(int id) => GameData.FinishWayData.GetValueOrDefault(
+        GameData.QuestDataData.GetValueOrDefault(id)?.FinishWayID ?? 0);
+
+    public async ValueTask RecordEvent(MissionFinishTypeEnum type, int count = 1, int parameter = 0)
+    {
+        if (count <= 0) return;
+        await RefreshAsync();
+        foreach (var id in Data.QuestIds.ToArray())
+        {
+            var finish = FinishWay(id);
+            if (finish?.FinishType != type) continue;
+            if (finish.ParamIntList.Count > 0 && !finish.ParamIntList.Contains(parameter)) continue;
+            if (finish.ParamIntList.Count == 0 && finish.ParamInt1 != 0 && finish.ParamInt1 != parameter) continue;
+            await RecordProgress(id, count);
         }
     }
 
-    public async ValueTask OnItemComposed(int count)
+    public async ValueTask<Retcode> ReportClientObjective(int id)
     {
-        await RecordProgress(2100148, count);
-        await RecordProgress(2100155, count);
+        await RefreshAsync();
+        // Photography is a client-only action. Never accept client claims for combat, items or NPC missions.
+        if (!IsAssigned(id) || FinishWay(id)?.FinishType != MissionFinishTypeEnum.TakePictureCnt)
+            return Retcode.RetQuestStatusError;
+        await RecordProgress(id, 1);
+        return Retcode.RetSucc;
     }
+
+    public async ValueTask OnItemComposed(int count) => await RecordEvent(MissionFinishTypeEnum.AnyItemComposeCount, count);
 
     private static List<ItemData>? RewardItems(int rewardId)
     {

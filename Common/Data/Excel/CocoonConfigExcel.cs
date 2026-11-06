@@ -4,6 +4,8 @@ namespace March7thHoney.Data.Excel;
 public class CocoonConfigExcel : ExcelResource
 {
     public int ID { get; set; }
+    public string CocoonType { get; set; } = "";
+    public string FarmType { get; set; } = "";
     public int MappingInfoID { get; set; }
     public int WorldLevel { get; set; }
     public int PropID { get; set; }

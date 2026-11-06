@@ -4,6 +4,7 @@ namespace March7thHoney.Data.Excel;
 public class MonsterConfigExcel : ExcelResource
 {
     public int MonsterID { get; set; }
+    public List<string> StanceWeakList { get; set; } = [];
     public int MonsterTemplateID { get; set; }
     public int HardLevelGroup { get; set; }
     public List<int> SummonIDList { get; set; } = [];

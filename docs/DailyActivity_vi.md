@@ -6,7 +6,10 @@ Server đã thay bảng daily giả 500 điểm/đã nhận hết thưởng bằ
 
 - Đọc điều kiện cấp độ, nhiệm vụ mở khóa và phần thưởng từ `DailyQuest`, `DailyMissionData`, `DailyActiveConfig`, `QuestData`, `FinishWay`, `RewardData`.
 - Giao một nhiệm vụ NPC daily đủ điều kiện. Khi hết ngày, chỉ đặt lại trạng thái/progress của nhiệm vụ daily được giao; giữ nguyên cốt truyện và thành tựu khác.
-- Có bộ mục tiêu huấn luyện cho cấp 10–35 và từ cấp 36: đăng nhập, phái đi/nhận thưởng thám hiểm, chiến đấu, dùng hỗ trợ, tổng hợp, nhiệm vụ NPC; cấp cao có thêm tiêu hao 120 năng lượng. Mục tiêu `2100156` nhận sự kiện hoàn thành quest liên quan hoặc thắng lượt Currency War cuối cùng.
+- Đọc `DailyActiveQuestPool`: dùng nhóm hiện đại 6–17 và nhóm nhiệm vụ NPC 1, mỗi nhóm chọn một mục tiêu đủ điều kiện cấp độ/mở khóa. Không trộn nhóm cũ 2–5 với nhóm mới. Mục tiêu đã xóa bị loại. Trong nhóm Rogue, chọn biến thể mới nhất còn hợp lệ (`2100156` trong resource 4.2).
+- Lựa chọn được xác định từ UID/ngày/nhóm và lưu cố định trong ngày. Đăng nhập lại, nâng cấp hay mở khóa nhiệm vụ giữa ngày không đổi bảng; bảng cũ trước khi cập nhật được giữ tới lần reset kế tiếp.
+- Nối sự kiện đăng nhập, thám hiểm, tiêu hao năng lượng, chiến đấu/điểm yếu/hỗ trợ, Calyx/Echo of War/Cavern/Stagnant Shadow, dùng bí kỹ có tiêu hao MP, phá vật thể, nâng cấp nhân vật/nón/di vật và tổng hợp. Chụp ảnh dùng báo cáo client cho đúng objective đã giao; không cho client tự hoàn thành mục tiêu chiến đấu hoặc NPC.
+- Mục tiêu `2100156` nhận hoàn thành quest liên quan hoặc thắng lượt Currency War cuối cùng. Một trận Rogue riêng lẻ không tự được tính như hoàn thành cả lượt chơi.
 - Đăng nhập chỉ hoàn thành mục tiêu đăng nhập. Nhận thưởng quest mới cộng điểm huấn luyện (item 23); item này không được thêm nhầm vào túi đồ. Điểm tối đa bằng mốc cao nhất trong bảng cấu hình.
 - Nhận từng mốc qua `TakeApReward` hoặc các mốc đủ điểm chưa nhận qua `TakeAllApReward`. Dùng phần thưởng theo World Level lúc khởi tạo bảng ngày đó. Yêu cầu lặp/đồng thời không cấp lại thưởng.
 - Nộp đồ kiểm tra đúng loại nhiệm vụ đang chạy và đủ vật phẩm; tổng hợp kiểm tra nguyên liệu trước khi ghi nhận daily.
@@ -34,8 +37,10 @@ Trong `ServerOption` của `Config.json`:
 
 ## Kiểm thử và giới hạn
 
-`dotnet run --project tests/DailyRegression -c Release -- Resources`: 16/16 tình huống qua, dùng resource thật và SQLite tạm. Bao gồm một chuỗi hội thoại NPC thật `3000201`, nhận thưởng đồng thời, lưu/đọc lại, ranh giới reset, dữ liệu legacy, nhánh cấp thấp, nguyên liệu và nộp vật phẩm. Test cốt truyện 6/6, rương 11 + 1 resource và GridFight 15/15 cũng qua. Build Release solution không lỗi; còn cảnh báo dependency/nullability hiện có.
+`dotnet run --project tests/DailyRegression -c Release -- Resources`: 21/21 tình huống, dùng resource thật trên cả SQLite tạm và MySQL 8.4.11 riêng. Bao gồm NPC hội thoại `3000201`, tương tác vật thể `3011601`, chọn/nộp vật phẩm `3011605`, bảng xoay, đổi cấp độ/ngày, reconnect, phó bản đúng loại, ảnh client, chống nhận trùng và tiêu hao nguyên liệu.
 
-Bộ mục tiêu huấn luyện đang dùng danh sách lựa chọn đã nối sự kiện server, không mô phỏng toàn bộ thuật toán xoay 52 mục tiêu của game gốc. NPC có loại bước `InteractPropList`/`UseSelectedItem` chưa có luồng hoàn thành phù hợp sẽ không được chọn; các loại bước được chọn gồm hội thoại, đếm bước hoàn thành, nộp đồ, thắng trận, diệt quái, tin nhắn và vào floor. Chưa chạy toàn bộ NPC/cutscene bằng client 4.2 hoặc kiểm thử MySQL. Chế độ Rogue chỉ đóng góp khi hệ thống đó phát sự kiện hoàn thành quest tương ứng; đây không phải bản triển khai thêm toàn bộ chế độ Rogue.
+`InteractPropList` kiểm tra floor, group, prop ID và lưu các prop đã tương tác để không đếm lặp. `UseSelectedItem` nhận đúng số ô lựa chọn (`ParamInt1`), kiểm tra vật phẩm thuộc danh sách và số lượng đúng, chỉ trừ lựa chọn đó rồi hoàn thành bước đang chạy. Hai loại này đã được đưa vào pool NPC hợp lệ.
+
+52 dòng `DailyQuest` không có nghĩa cả 52 đều cần xuất hiện trong bảng 4.2: có nhóm cũ, mục tiêu đã xóa và biến thể theo cấp. Quy tắc lấy một mục tiêu/nhóm hiện đại và chọn biến thể Rogue mới là cách diễn giải dữ liệu client; seed/trọng số xoay của server gốc không công khai, nên chưa thể khẳng định giống hoàn toàn. Chưa kiểm thử UI/cutscene toàn bộ NPC bằng client 4.2. Repo chưa có đầy đủ engine Simulated/Divergent Universe; daily chỉ nhận sự kiện hoàn thành có thật từ chế độ đã triển khai, không tự tạo chiến thắng Rogue.
 
 Lưu thưởng dùng `SaveUidData` hiện có, chưa có transaction bao trùm mọi bảng và mọi callback. Kiểm thử chống yêu cầu trùng không đồng nghĩa bảo đảm nguyên tử khi database/tiến trình lỗi giữa lúc cấp thưởng. Không xóa hoặc reset database người chơi trong quá trình triển khai và kiểm thử.

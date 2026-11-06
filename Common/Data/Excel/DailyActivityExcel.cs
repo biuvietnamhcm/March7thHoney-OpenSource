@@ -2,6 +2,15 @@ using March7thHoney.Util;
 
 namespace March7thHoney.Data.Excel;
 
+[ResourceEntity("DailyActiveQuestPool.json")]
+public class DailyActiveQuestPoolExcel : ExcelResource
+{
+    public int QuestID { get; set; }
+    public int Type { get; set; }
+    public override int GetId() => QuestID;
+    public override void Loaded() => GameData.DailyActiveQuestPoolData[QuestID] = this;
+}
+
 [ResourceEntity("DailyActiveConfig.json")]
 public class DailyActiveConfigExcel : ExcelResource
 {
