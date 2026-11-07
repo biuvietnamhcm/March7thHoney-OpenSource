@@ -20,6 +20,9 @@ SHARED_PATHS = {
 
 
 def should_redirect(host: str, path: str) -> bool:
+    # In particular, leave /admin/mi18n/*, CDN downloads and /query_security_file
+    # at their original hosts. Sending every vendor URL to Kestrel produces 404s
+    # for the SDK's translations and can leave error dialogs without text.
     host = host.lower().rstrip(".")
     vendor = any(host == suffix or host.endswith("." + suffix) for suffix in VENDOR_SUFFIXES)
     path = path.split("?", 1)[0]
@@ -54,6 +57,8 @@ class StarRailRedirect:
         original_host = request.host
         scheme, host, port = parse_target(ctx.options.march7th_server)
         request.scheme, request.host, request.port = scheme, host, port
+        # Preserve CN/Global business IDs and language. Rewriting those does not
+        # convert the embedded SDK and can make its response contract inconsistent.
         # Dispatch builds query_gateway from the incoming Host: it must see the local origin.
         authority = f"[{host}]" if ":" in host else host
         request.host_header = f"{authority}:{port}"
