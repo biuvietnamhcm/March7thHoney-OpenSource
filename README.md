@@ -49,6 +49,8 @@ Detailed implementation progress: [Gameplay Implementation Tree](docs/GameplayIm
 
 4.2 behavior and verification: [Daily Training (Vietnamese)](docs/DailyActivity_vi.md) | [Warp/Gacha (Vietnamese)](docs/Gacha42_vi.md).
 
+Client connection: [Single-player login (Vietnamese)](docs/SinglePlayerLogin_vi.md) | [Optional mitmproxy setup (Vietnamese)](docs/Proxy_vi.md).
+
 ## Muip API Entry
 
 - Muip API docs: [English](docs/MuipAPI.md) | [简中](docs/MuipAPI_zh-CN.md) | [繁中](docs/MuipAPI_zh-TW.md) | [日本語](docs/MuipAPI_ja-JP.md)

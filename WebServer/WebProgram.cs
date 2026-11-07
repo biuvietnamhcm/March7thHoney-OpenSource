@@ -68,6 +68,11 @@ public class Startup
     {
         if (env.IsDevelopment()) app.UseDeveloperExceptionPage();
 
+        app.Use(async (context, next) =>
+        {
+            Handler.SinglePlayerLogin.RememberPeer(context);
+            await next();
+        });
         app.UseForwardedHeaders();
 
         app.Use(async (context, next) =>

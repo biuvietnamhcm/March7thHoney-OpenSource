@@ -33,6 +33,7 @@ public class DispatchRoutes : ControllerBase
     }
 
     [HttpGet("query_dispatch")]
+    [HttpHead("query_dispatch")]
     public IActionResult QueryDispatch()
     {
         if (!Config.ServerOption.ServerConfig.RunDispatch)
@@ -140,7 +141,8 @@ public class DispatchRoutes : ControllerBase
     [HttpPost("/{gameKey}/mdk/shield/api/login")]
     public JsonResult Login([FromBody] LoginReqJson req)
     {
-        Debug($"shield login: account={req.account} is_crypto={req.is_crypto}");
+        if (SinglePlayerLogin.TryRespond(HttpContext, SinglePlayerResponse.Shield, out var local)) return local;
+        Debug($"shield login: account_len={req.account?.Length ?? 0} is_crypto={req.is_crypto}");
         var useRsa = Config.WebSecurity.EnableRsaLoginDecrypt && req.is_crypto;
         var (account, password, decryptFailed) = LoginCryptoHelper.TryDecryptCredentialsStrict(req.account, req.password, useRsa);
         if (decryptFailed)
@@ -153,9 +155,10 @@ public class DispatchRoutes : ControllerBase
     [HttpPost("/{gameKey}/account/ma-passport/api/appLoginByPassword")]
     public JsonResult PassportLogin([FromBody] PassportLoginReqJson req)
     {
-        Debug($"appLoginByPassword: account={req.account}");
-        var (account, password) =
-            LoginCryptoHelper.TryDecryptCredentials(req.account, req.password, Config.WebSecurity.EnableRsaLoginDecrypt);
+        if (SinglePlayerLogin.TryRespond(HttpContext, SinglePlayerResponse.Passport, out var local)) return local;
+        var (account, password, failed) =
+            LoginCryptoHelper.TryDecryptCredentialsStrict(req.account, req.password, Config.WebSecurity.EnableRsaLoginDecrypt);
+        if (failed) return new JsonResult(PassportLoginResJson.Error(-202, "Invalid encrypted login data"));
         var identityKeys = LoginIdentityContextFactory.Build(Request, req.device, req.device_id, req.device_fp);
         return new UsernameLoginHandler().HandlePassportLogin(account, password, identityKeys);
     }
@@ -164,6 +167,7 @@ public class DispatchRoutes : ControllerBase
     [HttpPost("/{gameKey}/mdk/shield/api/verify")]
     public JsonResult Verify([FromBody] VerifyReqJson req)
     {
+        if (SinglePlayerLogin.TryRespond(HttpContext, SinglePlayerResponse.Shield, out var local)) return local;
         Debug($"shield verify: uid={req.uid} token_len={(req.token?.Length ?? 0)}");
         var identityKeys = LoginIdentityContextFactory.Build(Request);
         return new TokenLoginHandler().HandleShieldVerify(req.uid!, req.token!, identityKeys);
@@ -173,6 +177,7 @@ public class DispatchRoutes : ControllerBase
     [HttpPost("/{gameKey}/combo/granter/login/v2/login")]
     public JsonResult LoginV2([FromBody] LoginV2ReqJson req)
     {
+        if (SinglePlayerLogin.TryRespond(HttpContext, SinglePlayerResponse.Combo, out var local)) return local;
         Debug($"combo login v2: app_id={req.app_id} channel_id={req.channel_id} data_len={(req.data?.Length ?? 0)}");
         var identityKeys = LoginIdentityContextFactory.Build(Request, req.device, req.data);
         return new ComboTokenGranterHandler().Handle(req.app_id, req.channel_id, req.data!, req.device!, req.sign!,
@@ -180,21 +185,33 @@ public class DispatchRoutes : ControllerBase
     }
 
     [HttpPost("/account/ma-cn-passport/app/loginByPassword")]
-    public ContentResult LegacyPassportLogin([FromBody] PassportLoginReqJson req)
+    public IActionResult LegacyPassportLogin([FromBody] PassportLoginReqJson req)
     {
-        Debug($"ma loginByPassword: account={req.account}");
-        var (account, password) =
-            LoginCryptoHelper.TryDecryptCredentials(req.account, req.password, Config.WebSecurity.EnableRsaLoginDecrypt);
+        if (SinglePlayerLogin.TryRespond(HttpContext, SinglePlayerResponse.Passport, out var local)) return local;
+        var (account, password, failed) =
+            LoginCryptoHelper.TryDecryptCredentialsStrict(req.account, req.password, Config.WebSecurity.EnableRsaLoginDecrypt);
+        if (failed) return new JsonResult(PassportLoginResJson.Error(-202, "Invalid encrypted login data"));
         var identityKeys = LoginIdentityContextFactory.Build(Request, req.device, req.device_id, req.device_fp);
         return new UsernameLoginHandler().HandleLegacyPassportLogin(account, password, identityKeys);
     }
 
     [HttpPost("/account/ma-cn-session/app/verify")]
-    public ContentResult PassportTokenVerify([FromBody] PassportTokenVerifyReqJson req)
+    public IActionResult PassportTokenVerify([FromBody] PassportTokenVerifyReqJson req)
     {
+        if (SinglePlayerLogin.TryRespond(HttpContext, SinglePlayerResponse.Passport, out var local)) return local;
         Debug($"ma verify: mid={req.mid}, token_len={(req.token.token?.Length ?? 0)} refresh={req.refresh}");
         var identityKeys = LoginIdentityContextFactory.Build(Request);
         return new TokenLoginHandler().HandlePassportVerify(req.mid!, req.token.token!, req.refresh, identityKeys);
+    }
+
+    [HttpPost("/account/ma-cn-session/app/exchange")]
+    [HttpPost("/account/ma-session/app/exchange")]
+    public JsonResult PassportTokenExchange()
+    {
+        if (SinglePlayerLogin.TryRespond(HttpContext, SinglePlayerResponse.Passport, out var local)) return local;
+        // The captured 4.2 SDK calls this route. Only the explicit local compatibility
+        // mode can answer without a verified exchange-token schema.
+        return new JsonResult(PassportLoginResJson.Error(-202, "Session exchange requires local single-player mode"));
     }
 
     [HttpGet("/hkrpg_global/combo/granter/api/getConfig")]

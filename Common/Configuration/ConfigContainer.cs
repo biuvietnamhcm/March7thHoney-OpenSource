@@ -287,7 +287,16 @@ public class MuipServerConfig
 
 public class WebSecurityConfig
 {
+    public SinglePlayerLoginConfig SinglePlayerLogin { get; set; } = new();
     public bool EnableRsaLoginDecrypt { get; set; } = true;
     public string RsaPublicKeyPem { get; set; } = "";
     public string RsaPrivateKeyPem { get; set; } = "";
+}
+
+public class SinglePlayerLoginConfig
+{
+    public bool Enabled { get; set; }
+    public string Username { get; set; } = "biu";
+    // Optional explicit binding keeps an existing save's UID when repairing a login name.
+    public int AccountUid { get; set; }
 }

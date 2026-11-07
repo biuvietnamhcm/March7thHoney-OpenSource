@@ -9,6 +9,7 @@ namespace March7thHoney.WebServer.Controllers;
 public class GateServerRoutes
 {
     [HttpGet("/query_gateway")]
+    [HttpHead("/query_gateway")]
     public async ValueTask<ContentResult> QueryGateway([FromQuery] GateWayRequest req)
     {
         if (!ConfigManager.Config.ServerOption.ServerConfig.RunGateway)

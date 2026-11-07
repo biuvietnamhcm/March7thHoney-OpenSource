@@ -81,7 +81,7 @@ public static class LoginCryptoHelper
             }
         }
 
-        Logger.Debug($"RSA login decrypt failed for all paddings, fallback plaintext. len={raw.Length}");
+        Logger.Debug($"RSA login decrypt failed for all paddings. len={raw.Length}");
         return new DecryptResult(raw, false);
     }
 
